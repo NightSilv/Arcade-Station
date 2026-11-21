@@ -3046,6 +3046,15 @@ static void gpu_init(void)
     u32 host_sz = HOST_SIZE;
     int i;
 
+    {   /* sondeo: cuanta memoria libre hay en el heap antes de pedir el bloque de video */
+        static const unsigned mb[] = { 192, 160, 128, 96, 64, 48, 32, 16, 8 };
+        unsigned k;
+        for (k = 0; k < sizeof mb / sizeof mb[0]; k++) {
+            void *t = malloc((size_t)mb[k] << 20);
+            if (t) { free(t); logf_("memoria: caben %u MB seguidos en el heap", mb[k]); break; }
+        }
+        if (k == sizeof mb / sizeof mb[0]) logf_("memoria: NO caben ni 8 MB seguidos");
+    }
     /* Arcade Station: el nucleo FBNeo ocupa mucha memoria; si no cabe el bloque de 32 MB se prueban 16 y 8 MB */
     while (host_sz >= 8 * 1024 * 1024) {
         host_addr = memalign(1024 * 1024, host_sz);
@@ -7482,6 +7491,7 @@ static void app_prepare(const char *argv0)
         rename(p, q);                     /* conserva el log de la vez anterior */
         g_log = fopen(p, "w");
     }
+    logf_("BUILD diag-2 (bloque RSX con respaldo + sondeo de memoria)");
     logf_("Arcade Station v0.1 (nucleo FBNeo, solo local; 1 a 4 mandos segun el juego; lienzo 320x240; render por CPU; base Katari v0.1.4 / NesNet v1.9.9) - dir=%s", g_dir);
     { char fd[300]; snprintf(fd, sizeof fd, "%s/fbneo", g_dir); mkdir(fd, 0777); }   /* Arcade Station: carpeta de FBNeo (muestras, nvram, hiscore) */
     cfg_load();
