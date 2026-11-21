@@ -83,6 +83,26 @@ jobs:
           git checkout -q FETCH_HEAD
           git log -1 --format=%H
 
+      - name: Parches para PS3 (los 2 errores del primer intento)
+        run: |
+          set -e
+          cd fbneo/src/dep/libs
+          # 1) zlib: PSL1GHT define __MACTYPES__ y zconf.h entonces no declara 'Byte'
+          sed -i 's/^#if !defined(__MACTYPES__)$/#if 1  \/* parche PS3: Byte siempre *\//' zlib/zconf.h
+          grep -n -B1 -A2 "parche PS3" zlib/zconf.h
+          # 2) plutosvg: PSL1GHT no tiene sys/mman.h; se apaga solo la carga de fuentes desde archivo (no se usa)
+          sed -i '1i #define PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD' plutosvg/plutosvg_all.c
+          head -3 plutosvg/plutosvg_all.c
+
+      - name: Recuperar objetos ya compilados (cache)
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: fbneo/src
+          key: fbneo-objs-${{ env.FBNEO_SHA }}-v1
+          restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-
+        continue-on-error: true
+
       - name: Compilar nucleo FBNeo completo con platform=psl1ght
         run: |
           cd fbneo/src/burner/libretro
@@ -93,6 +113,14 @@ jobs:
           set -e
           grep -n "error" "$GITHUB_WORKSPACE/core_build.log" | head -60 || true
           test "$rc" = "0"
+
+      - name: Guardar objetos compilados (cache)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fbneo/src
+          key: fbneo-objs-${{ env.FBNEO_SHA }}-v1-${{ github.run_id }}
+        continue-on-error: true
 
       - name: Tamano del nucleo
         run: |
