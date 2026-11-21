@@ -88,8 +88,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: fbneo/src
-          key: fbneo-objs-${{ env.FBNEO_SHA }}-v1
-          restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-
+          key: fbneo-objs-${{ env.FBNEO_SHA }}-v2
+          restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-v2-
         continue-on-error: true
 
       - name: Parches para PS3 (se aplican DESPUES de recuperar la cache; si ya estan puestos no se toca nada)
@@ -110,6 +110,8 @@ jobs:
           #    se fuerza a incluirlo (rfopen, rfseek, filestream_*, path_*, etc. quedan dentro del nucleo)
           if ! grep -q "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common; then
             sed -i 's/^ifneq (\$(STATIC_LINKING), 1)$/ifneq (0,1)   # parche PS3: el nucleo debe llevar su libretro-common/' burner/libretro/Makefile.common
+            # parche PS3: una sola entrada TOC por objeto (evita "relocation truncated to fit: R_PPC64_TOC16_DS")
+            grep -q "mminimal-toc" burner/libretro/Makefile || sed -i "s/^\tPLATFORM_DEFINES += -D__PS3__\$/\tPLATFORM_DEFINES += -D__PS3__ -mminimal-toc/" burner/libretro/Makefile
           fi
           grep -n "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common
 
@@ -133,7 +135,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: fbneo/src
-          key: fbneo-objs-${{ env.FBNEO_SHA }}-v1-${{ github.run_id }}
+          key: fbneo-objs-${{ env.FBNEO_SHA }}-v2-${{ github.run_id }}
         continue-on-error: true
 
       - name: Tamano del nucleo
