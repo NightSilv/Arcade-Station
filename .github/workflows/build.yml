@@ -1,4 +1,4 @@
-name: Prueba nucleo FBNeo para PS3
+name: Build Arcade Station
 
 on:
   push:
@@ -128,10 +128,62 @@ jobs:
           ls -la fbneo_libretro_psl1ght.a
           ppu-size fbneo_libretro_psl1ght.a 2>/dev/null | tail -1 || size fbneo_libretro_psl1ght.a | tail -1 || true
 
+      - name: Crear config.txt de ejemplo
+        run: |
+          mkdir -p data/USRDIR
+          cat > data/USRDIR/config.txt <<'CFG'
+          # Arcade Station - configuracion
+          # Los juegos (.zip de FBNeo, por ejemplo mwalk.zip) van en la carpeta roms/ dentro de USRDIR.
+          # Los BIOS (por ejemplo neogeo.zip) van en esa MISMA carpeta roms/.
+          # port: puerto TCP para el online (no se usa en la v0.1, que es solo local)
+          port=7780
+          # delay: 0 = automatico segun la latencia medida (online, v0.2)
+          delay=0
+          # public_ip: solo para el online (v0.2)
+          public_ip=
+          # res: vacio = 720p (por defecto) | auto = la resolucion de tu TV
+          res=
+          # render: vacio = cpu (por defecto, dibujo directo sin la GPU) | gpu = usa la GPU (se cuelga; no la uses)
+          render=
+          # zoom: vacio = automatico (1, 2, 3 o 4)
+          zoom=
+          # audio: vacio = con sonido | off = sin sonido (tambien se apaga manteniendo R2 al abrir)
+          audio=
+          CFG
+          sed -i 's/^          //' data/USRDIR/config.txt
+          cat data/USRDIR/config.txt
+
+      - name: Diagnostico de librerias C++
+        run: |
+          find "$PS3DEV" -name "libstdc++.a" -o -name "libsupc++.a" | head || true
+          echo "=== simbolos sysFs en el nucleo"
+          nm -A fbneo/src/burner/libretro/fbneo_libretro_psl1ght.a 2>/dev/null | grep -iE " U sysFs" | head -10 || true
+
+      - name: Compilar Arcade Station
+        run: |
+          set +e
+          make -k -j"$(nproc)" pkg 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          grep -n "error\|undefined reference" build.log | head -60 || true
+          test "$rc" = "0"
+          ls -la ArcadeStation*.pkg build/pkg/USRDIR/
+
+      - name: Guardar paquetes
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcadeStation
+          path: |
+            ArcadeStation.pkg
+            ArcadeStation.gnpdrm.pkg
+          if-no-files-found: error
+
       - name: Guardar registro
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: registro-fbneo
-          path: core_build.log
+          name: registro-arcade-station
+          path: |
+            core_build.log
+            build.log
           if-no-files-found: ignore
