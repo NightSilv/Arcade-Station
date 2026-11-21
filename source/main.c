@@ -3042,10 +3042,21 @@ static void gpu_init(void)
     videoState state;
     videoConfiguration vconfig;
     videoResolution res;
-    void *host_addr = memalign(1024 * 1024, HOST_SIZE);
+    void *host_addr = NULL;
+    u32 host_sz = HOST_SIZE;
     int i;
 
-    rsxInit(&g_ctx, CB_SIZE, HOST_SIZE, host_addr);
+    /* Arcade Station: el nucleo FBNeo ocupa mucha memoria; si no cabe el bloque de 32 MB se prueban 16 y 8 MB */
+    while (host_sz >= 8 * 1024 * 1024) {
+        host_addr = memalign(1024 * 1024, host_sz);
+        logf_("video: bloque RSX de %u MB -> %s", (unsigned)(host_sz >> 20), host_addr ? "ok" : "SIN MEMORIA");
+        if (host_addr) break;
+        host_sz >>= 1;
+    }
+    if (!host_addr) { logf_("ERROR: no hay memoria para iniciar el video"); return; }
+
+    rsxInit(&g_ctx, CB_SIZE, host_sz, host_addr);
+    logf_("video: rsxInit ok");
 
     videoGetState(0, 0, &state);
     logf_("video: modo de la TV resolucion id=%d", (int)state.displayMode.resolution);
@@ -3066,7 +3077,9 @@ static void gpu_init(void)
     vconfig.format     = VIDEO_BUFFER_FORMAT_XRGB;
     vconfig.pitch      = res.width * sizeof(u32);
 
+    logf_("video: configurando...");
     gpu_wait_idle();
+    logf_("video: gpu libre");
     videoConfigure(0, &vconfig, NULL, 0);
     videoGetState(0, 0, &state);
     logf_("video: configurado %ux%u", (unsigned)res.width, (unsigned)res.height);
