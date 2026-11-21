@@ -115,6 +115,10 @@ jobs:
 
       - name: Compilar nucleo FBNeo completo con platform=psl1ght
         run: |
+          # el makefile de FBNeo para PS3 no agrega la carpeta de cabeceras de PSL1GHT (lv2/systime.h, lv2/sysfs.h): se la damos por entorno
+          export C_INCLUDE_PATH="$PS3DEV/ppu/include:$PSL1GHT/ppu/include"
+          export CPLUS_INCLUDE_PATH="$PS3DEV/ppu/include:$PSL1GHT/ppu/include"
+          ls "$PSL1GHT/ppu/include/lv2/systime.h" "$PSL1GHT/ppu/include/lv2/sysfs.h"
           cd fbneo/src/burner/libretro
           # make -k: si hay errores salen todos juntos en un solo intento
           set +e
