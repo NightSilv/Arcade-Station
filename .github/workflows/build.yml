@@ -83,17 +83,6 @@ jobs:
           git checkout -q FETCH_HEAD
           git log -1 --format=%H
 
-      - name: Parches para PS3 (los 2 errores del primer intento)
-        run: |
-          set -e
-          cd fbneo/src/dep/libs
-          # 1) zlib: PSL1GHT define __MACTYPES__ y zconf.h entonces no declara 'Byte'
-          sed -i 's/^#if !defined(__MACTYPES__)$/#if 1  \/* parche PS3: Byte siempre *\//' zlib/zconf.h
-          grep -n -B1 -A2 "parche PS3" zlib/zconf.h
-          # 2) plutosvg: PSL1GHT no tiene sys/mman.h; se apaga solo la carga de fuentes desde archivo (no se usa)
-          sed -i '1i #define PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD' plutosvg/plutosvg_all.c
-          head -3 plutosvg/plutosvg_all.c
-
       - name: Recuperar objetos ya compilados (cache)
         id: cache
         uses: actions/cache/restore@v4
@@ -102,6 +91,27 @@ jobs:
           key: fbneo-objs-${{ env.FBNEO_SHA }}-v1
           restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-
         continue-on-error: true
+
+      - name: Parches para PS3 (se aplican DESPUES de recuperar la cache; si ya estan puestos no se toca nada)
+        run: |
+          set -e
+          cd fbneo/src
+          # 1) zlib: PSL1GHT define __MACTYPES__ y zconf.h entonces no declara 'Byte'
+          if ! grep -q "parche PS3" dep/libs/zlib/zconf.h; then
+            sed -i 's/^#if !defined(__MACTYPES__)$/#if 1  \/* parche PS3: Byte siempre *\//' dep/libs/zlib/zconf.h
+          fi
+          grep -n "parche PS3" dep/libs/zlib/zconf.h
+          # 2) plutosvg: PSL1GHT no tiene sys/mman.h; se apaga solo la carga de fuentes desde archivo (no se usa)
+          if ! grep -q "PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD" dep/libs/plutosvg/plutosvg_all.c; then
+            sed -i '1i #define PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD' dep/libs/plutosvg/plutosvg_all.c
+          fi
+          head -2 dep/libs/plutosvg/plutosvg_all.c
+          # 3) libretro-common: con STATIC_LINKING=1 FBNeo NO lo incluye (espera que lo ponga RetroArch). Aqui no hay RetroArch:
+          #    se fuerza a incluirlo (rfopen, rfseek, filestream_*, path_*, etc. quedan dentro del nucleo)
+          if ! grep -q "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common; then
+            sed -i 's/^ifneq (\$(STATIC_LINKING), 1)$/ifneq (0,1)   # parche PS3: el nucleo debe llevar su libretro-common/' burner/libretro/Makefile.common
+          fi
+          grep -n "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common
 
       - name: Compilar nucleo FBNeo completo con platform=psl1ght
         run: |
