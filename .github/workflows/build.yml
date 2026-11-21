@@ -1,1 +1,109 @@
+name: Prueba nucleo FBNeo para PS3
 
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FBNEO_SHA: 2cfc5f304fe8b1db65e464efaa50fa46f273c472
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install requirements
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install gcc g++ libelf-dev autoconf automake bison flex make texinfo patch wget zlib1g-dev libtool-bin bzip2 pkg-config libssl-dev p7zip-full perl
+
+      - name: Download PS3 SDK (ps3dev)
+        run: |
+          set -e
+          pick() {
+            gh api "repos/$1/releases?per_page=40" --jq '
+              [ .[] | select(.draft | not) | .assets[]?
+                | select(.name | test("ubuntu|linux"; "i"))
+                | select(.name | test("\\.tar\\.gz$"))
+                | select(.name | test("mac|osx|win|arm|aarch"; "i") | not) ]
+              | .[0].browser_download_url // empty'
+          }
+          for repo in ps3dev/ps3dev ps3dev/ps3toolchain; do
+            echo "=== releases de $repo"
+            gh api "repos/$repo/releases?per_page=15" --jq '.[] | "\(.tag_name) pre=\(.prerelease) :: \([.assets[].name] | join(", "))"' || true
+          done
+          URL=$(pick ps3dev/ps3dev)
+          FULL=1
+          if [ -z "$URL" ]; then
+            URL=$(pick ps3dev/ps3toolchain)
+            FULL=0
+          fi
+          if [ -z "$URL" ]; then
+            echo "::error::No encontre ningun SDK de PS3 precompilado para Linux"
+            exit 1
+          fi
+          echo "Descargando: $URL (sdk completo = $FULL)"
+          curl -fL --retry 3 "$URL" -o sdk.tar.gz
+          tar xzf sdk.tar.gz -C "$GITHUB_WORKSPACE"
+          echo "PS3DEV=$GITHUB_WORKSPACE/ps3dev" >> "$GITHUB_ENV"
+          echo "PSL1GHT=$GITHUB_WORKSPACE/ps3dev" >> "$GITHUB_ENV"
+          echo "PATH=$PATH:$GITHUB_WORKSPACE/ps3dev/bin:$GITHUB_WORKSPACE/ps3dev/ppu/bin:$GITHUB_WORKSPACE/ps3dev/spu/bin" >> "$GITHUB_ENV"
+          echo "SDK_FULL=$FULL" >> "$GITHUB_ENV"
+
+      - name: Build PSL1GHT (solo si el SDK descargado no lo trae)
+        run: |
+          set -e
+          if [ ! -f "$PSL1GHT/ppu_rules" ] || [ ! -f "$PS3DEV/ppu/lib/libnet.a" ]; then
+            echo "El SDK no trae PSL1GHT completo, lo compilo desde el codigo fuente"
+            git clone --depth 1 https://github.com/ps3dev/PSL1GHT.git psl1ght-src
+            cd psl1ght-src
+            make install-ctrl
+            make
+            make install
+          fi
+
+      - name: Comprobar SDK
+        run: |
+          test -x "$PS3DEV/ppu/bin/ppu-gcc" || { echo "::error::Falta ppu-gcc"; exit 1; }
+          test -f "$PSL1GHT/ppu_rules"      || { echo "::error::Falta ppu_rules"; exit 1; }
+          ppu-gcc --version | head -1
+          ppu-g++ --version | head -1
+
+      - name: Bajar FBNeo (commit fijado)
+        run: |
+          set -e
+          mkdir fbneo
+          cd fbneo
+          git init -q
+          git remote add origin https://github.com/libretro/FBNeo.git
+          git fetch --depth 1 origin "$FBNEO_SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --format=%H
+
+      - name: Compilar nucleo FBNeo completo con platform=psl1ght
+        run: |
+          cd fbneo/src/burner/libretro
+          # make -k: si hay errores salen todos juntos en un solo intento
+          set +e
+          make -k platform=psl1ght -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/core_build.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          grep -n "error" "$GITHUB_WORKSPACE/core_build.log" | head -60 || true
+          test "$rc" = "0"
+
+      - name: Tamano del nucleo
+        run: |
+          cd fbneo/src/burner/libretro
+          ls -la fbneo_libretro_psl1ght.a
+          ppu-size fbneo_libretro_psl1ght.a 2>/dev/null | tail -1 || size fbneo_libretro_psl1ght.a | tail -1 || true
+
+      - name: Guardar registro
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: registro-fbneo
+          path: core_build.log
+          if-no-files-found: ignore
