@@ -13,7 +13,7 @@ FBNEO    = fbneo/src/burner/libretro
 # FBNeo es C++: se enlaza con libstdc++.
 OFILES   = source/main.o
 
-CFLAGS   = -O2 -Wall -std=gnu99 -mcpu=cell $(MACHDEP) -DNESNET_PS3 \
+CFLAGS   = -O2 -Wall -std=gnu99 -mcpu=cell -mminimal-toc $(MACHDEP) -DNESNET_PS3 \
            -I$(PS3DEV)/ppu/include -I$(PSL1GHT)/ppu/include -I$(PSL1GHT)/ppu/include/simdmath \
            -I$(FBNEO)/libretro-common/include
 
