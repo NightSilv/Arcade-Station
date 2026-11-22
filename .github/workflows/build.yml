@@ -213,6 +213,17 @@ jobs:
           test "$rc" = "0"
           ls -la ArcadeStation*.pkg build/pkg/USRDIR/
 
+      - name: Memoria del ejecutable (diagnostico, no rompe el build)
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "=== tamano total del ejecutable (text data bss)"
+          (ppu-size ArcadeStation.elf || size ArcadeStation.elf) 2>&1 || true
+          echo "=== segmentos (MemSiz = memoria real que pide el programa)"
+          (ppu-readelf -lW ArcadeStation.elf || readelf -lW ArcadeStation.elf) 2>&1 | head -30 || true
+          echo "=== 25 simbolos mas grandes"
+          (ppu-nm --size-sort -S ArcadeStation.elf || nm --size-sort -S ArcadeStation.elf) 2>&1 | tail -25 || true
+
       - name: Guardar paquetes
         uses: actions/upload-artifact@v4
         with:
