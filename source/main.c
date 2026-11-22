@@ -3490,6 +3490,23 @@ static uint16_t script_input(int slot, uint32_t f)
 /* ------------------------------------------------------------------ */
 /* Nucleo libretro (FCEUmm)                                            */
 /* ------------------------------------------------------------------ */
+/* Arcade Station: los mensajes del nucleo (carga de ROM, errores) se guardan en arcade.log. Maximo 600 lineas (despues se ignoran) */
+static void core_log_cb(enum retro_log_level level, const char *fmt, ...)
+{
+    static int n = 0;
+    char buf[200];
+    va_list ap;
+    int i;
+    if (n >= 600) return;
+    n++;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    for (i = 0; buf[i]; i++) if (buf[i] == '\n' || buf[i] == '\r') buf[i] = ' ';
+    logf_("nucleo[%d]: %s", (int)level, buf);
+    if (n == 600) logf_("nucleo: demasiados mensajes, se dejan de guardar");
+}
+
 static bool env_cb(unsigned cmd, void *data)
 {
     switch (cmd) {
@@ -3504,6 +3521,9 @@ static bool env_cb(unsigned cmd, void *data)
     case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
     case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
         *(const char **)data = g_dir;
+        return true;
+    case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
+        ((struct retro_log_callback *)data)->log = core_log_cb;
         return true;
     case RETRO_ENVIRONMENT_GET_CAN_DUPE:
         *(bool *)data = true;
@@ -3724,7 +3744,9 @@ static int core_load(void)
     gi.size = 0;
     g_core_ports = 0;
     g_rot = 0;
-    if (!retro_load_game(&gi)) { g_err = "EL NUCLEO NO PUDO CARGAR LA ROM"; return 0; }
+    logf_("nucleo: cargando juego %s", g_cfg.rom);
+    if (!retro_load_game(&gi)) { logf_("nucleo: retro_load_game devolvio ERROR"); g_err = "EL NUCLEO NO PUDO CARGAR LA ROM"; return 0; }
+    logf_("nucleo: retro_load_game OK");
     for (p = 0; p < 4; p++) retro_set_controller_port_device((unsigned)p, RETRO_DEVICE_JOYPAD);
     g_nplayers = g_core_ports < 1 ? 2 : g_core_ports > 4 ? 4 : g_core_ports;
     logf_("jugadores del juego (segun el nucleo): %d  rotacion: %u", g_nplayers, g_rot);
@@ -7491,8 +7513,8 @@ static void app_prepare(const char *argv0)
         rename(p, q);                     /* conserva el log de la vez anterior */
         g_log = fopen(p, "w");
     }
-    logf_("BUILD diag-2 (bloque RSX con respaldo + sondeo de memoria)");
-    logf_("Arcade Station v0.1 (nucleo FBNeo, solo local; 1 a 4 mandos segun el juego; lienzo 320x240; render por CPU; base Katari v0.1.4 / NesNet v1.9.9) - dir=%s", g_dir);
+    logf_("BUILD fba2012-1 (nucleo FB Alpha 2012, solo arcade; los mensajes del nucleo van a este log)");
+    logf_("Arcade Station v0.1.1 (nucleo FB Alpha 2012, solo local; 1 a 4 mandos segun el juego; lienzo 320x240; render por CPU; base Katari v0.1.4 / NesNet v1.9.9) - dir=%s", g_dir);
     { char fd[300]; snprintf(fd, sizeof fd, "%s/fbneo", g_dir); mkdir(fd, 0777); }   /* Arcade Station: carpeta de FBNeo (muestras, nvram, hiscore) */
     cfg_load();
     logf_("config: res=%d render=%s zoom=%d audio=%s", g_cfg.res, g_cfg.render ? "cpu" : "gpu", g_cfg.zoom, g_cfg.audio ? "on" : "off");
