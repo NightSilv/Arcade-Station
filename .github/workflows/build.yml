@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 150
     env:
       GH_TOKEN: ${{ github.token }}
-      FBNEO_SHA: 2cfc5f304fe8b1db65e464efaa50fa46f273c472
+      FBA_SHA: 0ce31536bef3162fe7e69ff5f555334ec4913cef
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,112 +72,81 @@ jobs:
           ppu-gcc --version | head -1
           ppu-g++ --version | head -1
 
-      - name: Bajar FBNeo (commit fijado)
+      - name: Bajar FB Alpha 2012 (commit fijado)
         run: |
           set -e
-          mkdir fbneo
-          cd fbneo
+          mkdir fba
+          cd fba
           git init -q
-          git remote add origin https://github.com/libretro/FBNeo.git
-          git fetch --depth 1 origin "$FBNEO_SHA"
+          git remote add origin https://github.com/libretro/fbalpha2012.git
+          git fetch --depth 1 origin "$FBA_SHA"
           git checkout -q FETCH_HEAD
           git log -1 --format=%H
+          ls svn-current/trunk | head -20
 
       - name: Recuperar objetos ya compilados (cache)
         id: cache
         uses: actions/cache/restore@v4
         with:
-          path: fbneo/src
-          key: fbneo-objs-${{ env.FBNEO_SHA }}-v3
-          restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-v3-
+          path: fba/svn-current/trunk/src
+          key: fba2012-objs-${{ env.FBA_SHA }}-v1
+          restore-keys: fba2012-objs-${{ env.FBA_SHA }}-v1-
         continue-on-error: true
 
-      - name: Parches para PS3 (se aplican DESPUES de recuperar la cache; si ya estan puestos no se toca nada)
+      - name: Parches para PS3 y lista de juegos SOLO arcade (se aplican DESPUES de recuperar la cache; si ya estan puestos no se toca nada)
         run: |
           set -e
-          cd fbneo/src
+          cd fba/svn-current/trunk
           # 1) zlib: PSL1GHT define __MACTYPES__ y zconf.h entonces no declara 'Byte'
-          if ! grep -q "parche PS3" dep/libs/zlib/zconf.h; then
-            sed -i 's/^#if !defined(__MACTYPES__)$/#if 1  \/* parche PS3: Byte siempre *\//' dep/libs/zlib/zconf.h
+          if ! grep -q "parche PS3" src/dep/libs/zlib/zconf.h; then
+            sed -i 's/^#if !defined(__MACTYPES__)$/#if 1  \/* parche PS3: Byte siempre *\//' src/dep/libs/zlib/zconf.h
           fi
-          grep -n "parche PS3" dep/libs/zlib/zconf.h
-          # 2) plutosvg: PSL1GHT no tiene sys/mman.h; se apaga solo la carga de fuentes desde archivo (no se usa)
-          if ! grep -q "PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD" dep/libs/plutosvg/plutosvg_all.c; then
-            sed -i '1i #define PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD' dep/libs/plutosvg/plutosvg_all.c
+          grep -n "parche PS3" src/dep/libs/zlib/zconf.h
+          # 2) una sola entrada TOC por objeto (evita "relocation truncated to fit: R_PPC64_TOC16_DS")
+          if ! grep -q "D__PS3__ -mminimal-toc" makefile.libretro; then
+            sed -i 's/^    PLATFORM_DEFINES += -D__PS3__$/    PLATFORM_DEFINES += -D__PS3__ -mminimal-toc/' makefile.libretro
           fi
-          head -2 dep/libs/plutosvg/plutosvg_all.c
-          # 3) libretro-common: con STATIC_LINKING=1 FBNeo NO lo incluye (espera que lo ponga RetroArch). Aqui no hay RetroArch:
-          #    se fuerza a incluirlo (rfopen, rfseek, filestream_*, path_*, etc. quedan dentro del nucleo)
-          if ! grep -q "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common; then
-            sed -i 's/^ifneq (\$(STATIC_LINKING), 1)$/ifneq (0,1)   # parche PS3: el nucleo debe llevar su libretro-common/' burner/libretro/Makefile.common
-            # parche PS3: una sola entrada TOC por objeto (evita "relocation truncated to fit: R_PPC64_TOC16_DS")
-            grep -q "mminimal-toc" burner/libretro/Makefile || sed -i "s/^\tPLATFORM_DEFINES += -D__PS3__\$/\tPLATFORM_DEFINES += -D__PS3__ -mminimal-toc/" burner/libretro/Makefile
+          grep -n "D__PS3__ -mminimal-toc" makefile.libretro
+          # 3) Arcade Station: SOLO arcade. No se compilan consolas (Mega Drive, PC Engine, SNES) ni CPS3, y la lista de juegos se regenera
+          #    solo con las carpetas de arcade (asi no queda ninguna referencia a codigo que no se compila)
+          D=src/burn/drv
+          perl src/dep/scripts/gamelist.pl -o src/dep/generated/driverlist.h -l "$RUNNER_TEMP/gamelist_arcade.txt" \
+            $D/capcom $D/cave $D/dataeast $D/galaxian $D/irem $D/konami $D/neogeo $D/pgm $D/pre90s $D/psikyo $D/pst90s $D/sega $D/taito $D/toaplan
+          ls -la src/dep/generated/driverlist.h
+          grep -n "BurnDrvMWalk;" src/dep/generated/driverlist.h
+          if grep -qE "BurnDrv(md_|pce_|tg_|sgx_|sms_|gg_)" src/dep/generated/driverlist.h; then
+            echo "::error::La lista de juegos aun trae consolas"; exit 1
           fi
-          grep -n "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common
-          # 4) Arcade Station: solo arcade. Se quitan consolas y CPS3 (menos codigo y menos memoria en la PS3)
-          f=burner/libretro/Makefile.common
-          if ! grep -q "ArcadeStation subset" "$f"; then
-            for d in CHANNELF COLECO CPS3 GBA MD MSX NES PCE SG1000 SMS SNES SPECTRUM; do
-              sed -i "91,120{/^\t\$(${d}_DIR) \\\\\$/d}" "$f"
-            done
-            printf '\n# ArcadeStation subset\nFBNEO_DEFINES += -DSUPPORT_SPLIT_DRIVER -DBUILD_ATARI -DBUILD_CAPCOM -DBUILD_CAVE -DBUILD_DATAEAST -DBUILD_GALAXIAN -DBUILD_IREM -DBUILD_KONAMI -DBUILD_MIDWAY -DBUILD_NEOGEO -DBUILD_PGM -DBUILD_PGM2 -DBUILD_PRE90S -DBUILD_PSIKYO -DBUILD_PST90S -DBUILD_SEGA -DBUILD_TAITO -DBUILD_TOAPLAN\n' >> "$f"
-          fi
-          sed -n 91,121p "$f"
-          grep -n "ArcadeStation subset" -A1 "$f"
-          # 5) Arcade Station: FBNeo reserva ~80 MB de memoria fija (bss) solo por las CPU TMS34010 (Midway T/W-unit, Itech) y Hyperstone E1-32 (Eolith, Vamphalf...).
-          #    La PS3 solo deja unos 16-31 MB libres, asi que se quitan esas CPU y los juegos que las usan, y el PCE-vdc (solo PC Engine)
-          if ! grep -q "ArcadeStation sin CPU pesadas" burner/libretro/Makefile.all; then
-            D='$(FBNEO_BURN_DRIVERS_DIR)'
-            {
-              echo "# ArcadeStation sin CPU pesadas"
-              echo "BURN_BLACKLIST += \$(FBNEO_BURN_DEVICES_DIR)/vdc.cpp \$(FBNEO_CPU_DIR)/tms34_intf.cpp \$(E132XS_CPU_DIR)/e132xs.cpp \$(wildcard \$(TMS34010_CPU_DIR)/*.cpp)"
-              echo "BURN_BLACKLIST += $D/midway/d_tunit.cpp $D/midway/d_wunit.cpp $D/midway/d_xunit.cpp $D/midway/d_yunit.cpp $D/midway/midwunit.cpp $D/midway/midtunit.cpp"
-              echo "BURN_BLACKLIST += $D/pst90s/d_btoads.cpp $D/pst90s/d_artmagic.cpp $D/pst90s/d_littlerb.cpp $D/pst90s/d_megaphx.cpp $D/pst90s/d_itech8.cpp $D/pre90s/d_capbowl.cpp $D/pre90s/d_exterm.cpp"
-              echo "BURN_BLACKLIST += $D/pst90s/d_f-32.cpp $D/pst90s/d_vegaeo.cpp $D/pst90s/d_gstream.cpp $D/pst90s/d_limenko.cpp $D/pst90s/d_eolith16.cpp $D/pst90s/d_pasha2.cpp $D/pst90s/d_eolith.cpp $D/pst90s/d_vamphalf.cpp $D/pst90s/d_x2222.cpp"
-              cat burner/libretro/Makefile.all
-            } > /tmp/Makefile.all.new
-            mv /tmp/Makefile.all.new burner/libretro/Makefile.all
-          fi
-          head -5 burner/libretro/Makefile.all | cut -c1-200
-          # la lista de juegos (driverlist.h) viene hecha con TODOS los juegos: se regenera solo con lo que se compila
-          (cd burner/libretro && make platform=psl1ght generate-files 2>&1 | tail -5)
-          ls -la dep/generated/driverlist.h
 
-      - name: Compilar nucleo FBNeo completo con platform=psl1ght
+      - name: Compilar nucleo FB Alpha 2012 (solo arcade) con platform=psl1ght
         run: |
-          # el makefile de FBNeo para PS3 no agrega la carpeta de cabeceras de PSL1GHT (lv2/systime.h, lv2/sysfs.h): se la damos por entorno
+          # PSL1GHT necesita sus cabeceras (lv2/systime.h, lv2/sysfs.h) en la ruta de includes
           export C_INCLUDE_PATH="$PS3DEV/ppu/include:$PSL1GHT/ppu/include"
           export CPLUS_INCLUDE_PATH="$PS3DEV/ppu/include:$PSL1GHT/ppu/include"
-          ls "$PSL1GHT/ppu/include/lv2/systime.h" "$PSL1GHT/ppu/include/lv2/sysfs.h"
-          cd fbneo/src/burner/libretro
+          cd fba/svn-current/trunk
           # make -k: si hay errores salen todos juntos en un solo intento
           set +e
-          make -k platform=psl1ght -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/core_build.log"
+          make -f makefile.libretro -k platform=psl1ght -j"$(nproc)" INCLUDE_7Z_SUPPORT=0 SNES_DIR= CPS3_DIR= MD_DIR= PCE_DIR= 2>&1 | tee "$GITHUB_WORKSPACE/core_build.log"
           rc=${PIPESTATUS[0]}
           set -e
           grep -n "error" "$GITHUB_WORKSPACE/core_build.log" | head -60 || true
           test "$rc" = "0"
+          ls -la fbalpha2012_libretro_psl1ght.a
 
       - name: Guardar objetos compilados (cache)
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: fbneo/src
-          key: fbneo-objs-${{ env.FBNEO_SHA }}-v3-${{ github.run_id }}
+          path: fba/svn-current/trunk/src
+          key: fba2012-objs-${{ env.FBA_SHA }}-v1-${{ github.run_id }}
         continue-on-error: true
-
-      - name: Tamano del nucleo
-        run: |
-          cd fbneo/src/burner/libretro
-          ls -la fbneo_libretro_psl1ght.a
-          ppu-size fbneo_libretro_psl1ght.a 2>/dev/null | tail -1 || size fbneo_libretro_psl1ght.a | tail -1 || true
 
       - name: Crear config.txt de ejemplo
         run: |
           mkdir -p data/USRDIR
           cat > data/USRDIR/config.txt <<'CFG'
           # Arcade Station - configuracion
-          # Los juegos (.zip de FBNeo, por ejemplo mwalk.zip) van en la carpeta roms/ dentro de USRDIR.
+          # Los juegos (.zip de FB Alpha 2012, por ejemplo mwalk.zip) van en la carpeta roms/ dentro de USRDIR.
           # Los BIOS (por ejemplo neogeo.zip) van en esa MISMA carpeta roms/.
           # port: puerto TCP para el online (no se usa en la v0.1, que es solo local)
           port=7780
@@ -196,12 +165,6 @@ jobs:
           CFG
           sed -i 's/^          //' data/USRDIR/config.txt
           cat data/USRDIR/config.txt
-
-      - name: Diagnostico de librerias C++
-        run: |
-          find "$PS3DEV" -name "libstdc++.a" -o -name "libsupc++.a" | head || true
-          echo "=== simbolos sysFs en el nucleo"
-          nm -A fbneo/src/burner/libretro/fbneo_libretro_psl1ght.a 2>/dev/null | grep -iE " U sysFs" | head -10 || true
 
       - name: Compilar Arcade Station
         run: |
