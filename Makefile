@@ -1,25 +1,25 @@
-# Arcade Station - emulador arcade (nucleo FBNeo) para PS3 (PSL1GHT), basado en Katari v0.1.4 / NesNet v1.9.9
-# Requiere: PS3DEV y PSL1GHT en el entorno, y el nucleo FBNeo ya compilado en
-# fbneo/src/burner/libretro/fbneo_libretro_psl1ght.a (lo hace el workflow de GitHub Actions).
+# Arcade Station - emulador arcade (nucleo FB Alpha 2012, solo arcade) para PS3 (PSL1GHT), basado en Katari v0.1.4 / NesNet v1.9.9
+# Requiere: PS3DEV y PSL1GHT en el entorno, y el nucleo FBA 2012 ya compilado en
+# fba/svn-current/trunk/fbalpha2012_libretro_psl1ght.a (lo hace el workflow de GitHub Actions).
 
 TARGET   = ArcadeStation
 TITLE    = Arcade Station
 APPID    = ARCA00001
 CONTENTID = UP0001-$(APPID)_00-0000000000000000
 
-FBNEO    = fbneo/src/burner/libretro
+FBA      = fba/svn-current/trunk
 
-# El nucleo se compila como libreria estatica CON su libretro-common dentro (VFS, file_stream...), asi que aqui solo va main.c.
-# FBNeo es C++: se enlaza con libstdc++.
+# El nucleo FBA 2012 se compila como libreria estatica; aqui solo va main.c.
+# El nucleo es C++: se enlaza con libstdc++.
 OFILES   = source/main.o
 
 CFLAGS   = -O2 -Wall -std=gnu99 -mcpu=cell -mminimal-toc $(MACHDEP) -DNESNET_PS3 \
            -I$(PS3DEV)/ppu/include -I$(PSL1GHT)/ppu/include -I$(PSL1GHT)/ppu/include/simdmath \
-           -I$(FBNEO)/libretro-common/include
+           -I$(FBA)/src/burner/libretro -I$(FBA)/src/burner/libretro/libretro-common/include
 
 LDFLAGS  = $(MACHDEP)
 
-LIBS     = $(FBNEO)/fbneo_libretro_psl1ght.a \
+LIBS     = $(FBA)/fbalpha2012_libretro_psl1ght.a \
            -lrsx -lgcm_sys -lio -laudio -lsysfs -lsysutil -lnetctl -lnet -lsysmodule -lrt -llv2 \
            -lstdc++ -lsupc++ -lm
 
