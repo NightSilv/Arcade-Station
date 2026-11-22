@@ -124,6 +124,24 @@ jobs:
           fi
           sed -n 91,121p "$f"
           grep -n "ArcadeStation subset" -A1 "$f"
+          # 5) Arcade Station: FBNeo reserva ~80 MB de memoria fija (bss) solo por las CPU TMS34010 (Midway T/W-unit, Itech) y Hyperstone E1-32 (Eolith, Vamphalf...).
+          #    La PS3 solo deja unos 16-31 MB libres, asi que se quitan esas CPU y los juegos que las usan, y el PCE-vdc (solo PC Engine)
+          if ! grep -q "ArcadeStation sin CPU pesadas" burner/libretro/Makefile.all; then
+            D='$(FBNEO_BURN_DRIVERS_DIR)'
+            {
+              echo "# ArcadeStation sin CPU pesadas"
+              echo "BURN_BLACKLIST += \$(FBNEO_BURN_DEVICES_DIR)/vdc.cpp \$(FBNEO_CPU_DIR)/tms34_intf.cpp \$(E132XS_CPU_DIR)/e132xs.cpp \$(wildcard \$(TMS34010_CPU_DIR)/*.cpp)"
+              echo "BURN_BLACKLIST += $D/midway/d_tunit.cpp $D/midway/d_wunit.cpp $D/midway/d_xunit.cpp $D/midway/d_yunit.cpp $D/midway/midwunit.cpp $D/midway/midtunit.cpp"
+              echo "BURN_BLACKLIST += $D/pst90s/d_btoads.cpp $D/pst90s/d_artmagic.cpp $D/pst90s/d_littlerb.cpp $D/pst90s/d_megaphx.cpp $D/pst90s/d_itech8.cpp $D/pre90s/d_capbowl.cpp $D/pre90s/d_exterm.cpp"
+              echo "BURN_BLACKLIST += $D/pst90s/d_f-32.cpp $D/pst90s/d_vegaeo.cpp $D/pst90s/d_gstream.cpp $D/pst90s/d_limenko.cpp $D/pst90s/d_eolith16.cpp $D/pst90s/d_pasha2.cpp $D/pst90s/d_eolith.cpp $D/pst90s/d_vamphalf.cpp $D/pst90s/d_x2222.cpp"
+              cat burner/libretro/Makefile.all
+            } > /tmp/Makefile.all.new
+            mv /tmp/Makefile.all.new burner/libretro/Makefile.all
+          fi
+          head -5 burner/libretro/Makefile.all | cut -c1-200
+          # la lista de juegos (driverlist.h) viene hecha con TODOS los juegos: se regenera solo con lo que se compila
+          (cd burner/libretro && make platform=psl1ght generate-files 2>&1 | tail -5)
+          ls -la dep/generated/driverlist.h
 
       - name: Compilar nucleo FBNeo completo con platform=psl1ght
         run: |
