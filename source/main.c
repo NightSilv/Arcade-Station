@@ -110,6 +110,8 @@ int closesocket(int s);      /* definida en libnet, pero sin prototipo en las ca
 #define NB_X      0x200
 #define NB_L      0x400
 #define NB_R      0x800
+#define NB_L2     0x1000   /* Arcade Station: L2 solo en los mandos 2 a 4 (en el 1 es la captura) */
+#define NB_R2     0x2000
 
 /* Botones de la interfaz (menus) */
 #define UI_UP     0x01
@@ -3346,6 +3348,8 @@ static uint16_t pad_nes_bits(int port)
         if (d->BTN_TRIANGLE) b |= NB_X;
         if (d->BTN_L1)       b |= NB_L;
         if (d->BTN_R1)       b |= NB_R;
+        if (d->BTN_R2)       b |= NB_R2;                          /* Arcade Station: 7o y 8o boton de algunos juegos */
+        if (port > 0 && d->BTN_L2) b |= NB_L2;
         return b;
     }
 }
@@ -3549,11 +3553,43 @@ static bool env_cb(unsigned cmd, void *data)
 /* Arcade Station: FBNeo entrega cuadros de tamanos distintos (320x224, 384x224, 304x224...) y los juegos verticales piden
  * rotacion (SET_ROTATION, antihoraria x90). Todo se escala por vecino mas cercano al lienzo fijo de 320x240 (4:3, como el monitor
  * de un arcade). Decide solo con el cuadro actual y la rotacion (sin estado oculto): dos consolas hacen lo mismo. */
+/* Arcade Station: pixel (X,Y) de la imagen YA rotada, convertido a 0xAARRGGBB */
+static inline uint32_t vid_px(const void *data, unsigned w, unsigned h, size_t pitch, unsigned X, unsigned Y)
+{
+    unsigned sx, sy;
+    const uint8_t *row;
+    switch (g_rot) {
+    case 1:  sx = w - 1 - Y; sy = X; break;
+    case 2:  sx = w - 1 - X; sy = h - 1 - Y; break;
+    case 3:  sx = Y; sy = h - 1 - X; break;
+    default: sx = X; sy = Y; break;
+    }
+    row = (const uint8_t *)data + (size_t)sy * pitch;
+    if (g_pixfmt == RETRO_PIXEL_FORMAT_RGB565) {
+        uint32_t q = ((const uint16_t *)row)[sx];
+        uint32_t r = (q >> 11) & 31, g = (q >> 5) & 63, b = q & 31;
+        return 0xFF000000u | (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
+    }
+    return 0xFF000000u | (((const uint32_t *)row)[sx] & 0x00FFFFFFu);
+}
+
+/* mezcla a (peso 256-t) y b (peso t), t = 0..255, por canal */
+static inline uint32_t vid_mix(uint32_t a, uint32_t b, uint32_t t)
+{
+    uint32_t it = 256u - t;
+    uint32_t rb = (((a & 0x00FF00FFu) * it + (b & 0x00FF00FFu) * t) >> 8) & 0x00FF00FFu;
+    uint32_t g  = (((a & 0x0000FF00u) * it + (b & 0x0000FF00u) * t) >> 8) & 0x0000FF00u;
+    return 0xFF000000u | rb | g;
+}
+
+/* Arcade Station: la imagen del nucleo (CPS1 = 384x224, otras 320x240, 256x224...) se pasa al lienzo de 320x240.
+ * Si el tamano coincide se copia tal cual; si no, se escala con interpolacion bilineal en enteros (sin decimales: igual en
+ * todas las consolas). El escalado "al vecino mas cercano" de antes tiraba columnas a trozos y deformaba los textos. */
 static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
 {
     unsigned x, y, ew, eh;
     uint32_t hsh = 2166136261u;
-    unsigned sxm[SCR_W];
+    unsigned x0[SCR_W], x1[SCR_W], xf[SCR_W];
     if (!data) return;                      /* frame repetido: no hay cambios */
     g_vid_fresh = 1;
     if (w < 1) w = 1;
@@ -3562,29 +3598,35 @@ static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
     if (h > 1024) h = 1024;
     ew = (g_rot & 1u) ? h : w;              /* tamano de la imagen YA rotada */
     eh = (g_rot & 1u) ? w : h;
-    for (x = 0; x < SCR_W; x++) sxm[x] = (x * ew) / SCR_W;
+    for (x = 0; x < SCR_W; x++) {
+        int c = (int)(((2u * x + 1u) * ew * 128u) / SCR_W) - 128;   /* centro del pixel destino, en 1/256 de pixel origen */
+        unsigned a;
+        if (c < 0) c = 0;
+        a = (unsigned)c >> 8;
+        if (a > ew - 1) a = ew - 1;
+        x0[x] = a; x1[x] = a + 1 < ew ? a + 1 : a; xf[x] = (unsigned)c & 255u;
+    }
     for (y = 0; y < SCR_H; y++) {
-        unsigned Y = (y * eh) / SCR_H;
+        int c = (int)(((2u * y + 1u) * eh * 128u) / SCR_H) - 128;
+        unsigned y0, y1, yf;
         uint32_t *dst = &g_fb[y * SCR_W];
+        if (c < 0) c = 0;
+        y0 = (unsigned)c >> 8;
+        if (y0 > eh - 1) y0 = eh - 1;
+        y1 = y0 + 1 < eh ? y0 + 1 : y0;
+        yf = (unsigned)c & 255u;
+        if (ew == SCR_W && eh == SCR_H) {
+            for (x = 0; x < SCR_W; x++) dst[x] = vid_px(data, w, h, pitch, x, y);
+            continue;
+        }
         for (x = 0; x < SCR_W; x++) {
-            unsigned X = sxm[x], sx, sy;
-            const uint8_t *row;
-            uint32_t px;
-            switch (g_rot) {
-            case 1:  sx = w - 1 - Y; sy = X; break;
-            case 2:  sx = w - 1 - X; sy = h - 1 - Y; break;
-            case 3:  sx = Y; sy = h - 1 - X; break;
-            default: sx = X; sy = Y; break;
+            uint32_t top = vid_px(data, w, h, pitch, x0[x], y0);
+            uint32_t bot = vid_px(data, w, h, pitch, x0[x], y1);
+            if (xf[x]) {
+                top = vid_mix(top, vid_px(data, w, h, pitch, x1[x], y0), xf[x]);
+                bot = vid_mix(bot, vid_px(data, w, h, pitch, x1[x], y1), xf[x]);
             }
-            row = (const uint8_t *)data + (size_t)sy * pitch;
-            if (g_pixfmt == RETRO_PIXEL_FORMAT_RGB565) {
-                uint32_t q = ((const uint16_t *)row)[sx];
-                uint32_t r = (q >> 11) & 31, g = (q >> 5) & 63, b = q & 31;
-                px = 0xFF000000u | (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
-            } else {
-                px = 0xFF000000u | (((const uint32_t *)row)[sx] & 0x00FFFFFFu);
-            }
-            dst[x] = px;
+            dst[x] = yf ? vid_mix(top, bot, yf) : top;
         }
     }
     for (y = 0; y < SCR_W * SCR_H; y++) hsh = fnv_u32(hsh, g_fb[y]);
@@ -3612,6 +3654,8 @@ static int16_t input_state_cb(unsigned port, unsigned dev, unsigned idx, unsigne
     case RETRO_DEVICE_ID_JOYPAD_X:      bit = 9; break;
     case RETRO_DEVICE_ID_JOYPAD_L:      bit = 10; break;
     case RETRO_DEVICE_ID_JOYPAD_R:      bit = 11; break;
+    case RETRO_DEVICE_ID_JOYPAD_L2:     bit = 12; break;
+    case RETRO_DEVICE_ID_JOYPAD_R2:     bit = 13; break;
     default: return 0;
     }
     return (g_pad[port] >> bit) & 1;
@@ -3732,12 +3776,20 @@ static void core_boot(void)
     retro_init();
 }
 
+static int g_core_dirty;                  /* 1 = ya se cargo un juego: antes de otro hay que reiniciar el nucleo (retro_deinit + retro_init) */
 static int g_nplayers = 2;                /* Arcade Station: jugadores del juego cargado (2 por defecto, maximo 4) */
 static int core_load(void)
 {
     struct retro_game_info gi;
     int p;
     if (g_core_loaded) return 1;
+    if (g_core_dirty) {   /* FBA 2012: retro_unload_game NO libera el juego anterior; cargar otro encima colgaba la PS3 */
+        logf_("nucleo: reiniciando (deinit + init) antes de otro juego");
+        retro_deinit();
+        retro_init();
+        g_core_dirty = 0;
+    }
+    g_core_dirty = 1;
     memset(&gi, 0, sizeof gi);
     gi.path = g_cfg.rom;                      /* FBNeo abre el .zip por ruta (need_fullpath): sin datos en memoria */
     gi.data = NULL;
@@ -3767,6 +3819,8 @@ static int core_load4(void)
 {
     struct retro_game_info gi;
     if (g_core_loaded) return 1;
+    if (g_core_dirty) { logf_("nucleo: reiniciando (deinit + init) antes de otro juego"); retro_deinit(); retro_init(); g_core_dirty = 0; }
+    g_core_dirty = 1;
     memset(&gi, 0, sizeof gi);
     gi.path = g_cfg.rom;
     gi.data = g_rom;
@@ -3790,7 +3844,7 @@ static int core_load4(void)
 
 static void core_unload(void)
 {
-    if (g_core_loaded) { retro_unload_game(); g_core_loaded = 0; }
+    if (g_core_loaded) { logf_("nucleo: juego cerrado"); retro_unload_game(); g_core_loaded = 0; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -7584,6 +7638,7 @@ static int app_main(const char *argv0)
     }
     logf_("salida");
     au_close();
+    if (g_core_loaded) { retro_unload_game(); g_core_loaded = 0; }
     retro_deinit();
     if (g_log) fclose(g_log);
     return 0;
