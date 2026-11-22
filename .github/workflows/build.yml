@@ -88,8 +88,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: fbneo/src
-          key: fbneo-objs-${{ env.FBNEO_SHA }}-v2
-          restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-v2-
+          key: fbneo-objs-${{ env.FBNEO_SHA }}-v3
+          restore-keys: fbneo-objs-${{ env.FBNEO_SHA }}-v3-
         continue-on-error: true
 
       - name: Parches para PS3 (se aplican DESPUES de recuperar la cache; si ya estan puestos no se toca nada)
@@ -114,6 +114,16 @@ jobs:
             grep -q "mminimal-toc" burner/libretro/Makefile || sed -i "s/^\tPLATFORM_DEFINES += -D__PS3__\$/\tPLATFORM_DEFINES += -D__PS3__ -mminimal-toc/" burner/libretro/Makefile
           fi
           grep -n "parche PS3: el nucleo debe llevar su libretro-common" burner/libretro/Makefile.common
+          # 4) Arcade Station: solo arcade. Se quitan consolas y CPS3 (menos codigo y menos memoria en la PS3)
+          f=burner/libretro/Makefile.common
+          if ! grep -q "ArcadeStation subset" "$f"; then
+            for d in CHANNELF COLECO CPS3 GBA MD MSX NES PCE SG1000 SMS SNES SPECTRUM; do
+              sed -i "91,120{/^\t\$(${d}_DIR) \\\\\$/d}" "$f"
+            done
+            printf '\n# ArcadeStation subset\nFBNEO_DEFINES += -DSUPPORT_SPLIT_DRIVER -DBUILD_ATARI -DBUILD_CAPCOM -DBUILD_CAVE -DBUILD_DATAEAST -DBUILD_GALAXIAN -DBUILD_IREM -DBUILD_KONAMI -DBUILD_MIDWAY -DBUILD_NEOGEO -DBUILD_PGM -DBUILD_PGM2 -DBUILD_PRE90S -DBUILD_PSIKYO -DBUILD_PST90S -DBUILD_SEGA -DBUILD_TAITO -DBUILD_TOAPLAN\n' >> "$f"
+          fi
+          sed -n 91,121p "$f"
+          grep -n "ArcadeStation subset" -A1 "$f"
 
       - name: Compilar nucleo FBNeo completo con platform=psl1ght
         run: |
@@ -135,7 +145,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: fbneo/src
-          key: fbneo-objs-${{ env.FBNEO_SHA }}-v2-${{ github.run_id }}
+          key: fbneo-objs-${{ env.FBNEO_SHA }}-v3-${{ github.run_id }}
         continue-on-error: true
 
       - name: Tamano del nucleo
