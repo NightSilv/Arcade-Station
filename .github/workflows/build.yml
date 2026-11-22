@@ -117,6 +117,22 @@ jobs:
           if grep -qE "BurnDrv(md_|pce_|tg_|sgx_|sms_|gg_)" src/dep/generated/driverlist.h; then
             echo "::error::La lista de juegos aun trae consolas"; exit 1
           fi
+          # 4) Moonwalker (mwalk) viene marcado "no funciona" en FBA 2012 y el nucleo se niega a cargarlo (FBNeo si lo marca como funcionando).
+          #    PRUEBA: se marca como funcionando para ver que hace. Puede verse mal, sin sonido o no andar.
+          if ! grep -q "parche ArcadeStation mwalk" src/burn/drv/sega/d_sys18.cpp; then
+            perl -0pi -e 's/("mwalk", NULL, NULL, NULL, "1990",\n[^\n]*\n[^\n]*\n)\t0, 3, /$1\t\/* parche ArcadeStation mwalk *\/ BDF_GAME_WORKING, 3, /' src/burn/drv/sega/d_sys18.cpp
+          fi
+          grep -q "parche ArcadeStation mwalk" src/burn/drv/sega/d_sys18.cpp || { echo "::error::No se pudo aplicar el parche de mwalk"; exit 1; }
+          # 5) el nucleo ignora lo que devuelve BurnDrvInit: se anota en arcade.log
+          if ! grep -q "rc_init = BurnDrvInit" src/burner/libretro/libretro.cpp; then
+            perl -0pi -e 's/^   BurnDrvInit\(\);$/   { int rc_init = BurnDrvInit(); log_cb(RETRO_LOG_INFO, "[FBA] BurnDrvInit devolvio %d\\n", rc_init); }/m' src/burner/libretro/libretro.cpp
+          fi
+          grep -q "rc_init = BurnDrvInit" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de BurnDrvInit"; exit 1; }
+          # 6) retro_deinit libera g_fba_frame pero no lo pone a NULL: un segundo retro_deinit lo liberaria dos veces
+          if ! grep -q "g_fba_frame = NULL" src/burner/libretro/libretro.cpp; then
+            perl -0pi -e 's/free\(g_fba_frame\);/{ free(g_fba_frame); g_fba_frame = NULL; }/' src/burner/libretro/libretro.cpp
+          fi
+          grep -q "g_fba_frame = NULL" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de g_fba_frame"; exit 1; }
 
       - name: Compilar nucleo FB Alpha 2012 (solo arcade) con platform=psl1ght
         run: |
