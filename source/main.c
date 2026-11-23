@@ -3612,11 +3612,46 @@ static inline uint32_t vid_mix(uint32_t a, uint32_t b, uint32_t t)
 /* Arcade Station: la imagen del nucleo (CPS1 = 384x224, otras 320x240, 256x224...) se pasa al lienzo de 320x240.
  * Si el tamano coincide se copia tal cual; si no, se escala con interpolacion bilineal en enteros (sin decimales: igual en
  * todas las consolas). El escalado "al vecino mas cercano" de antes tiraba columnas a trozos y deformaba los textos. */
+static int g_need_crc = 1;               /* 0 en partida SOLO: el hash del cuadro solo sirve para comparar dos consolas */
+/* un renglon de la imagen origen (ya rotada) llevado a 320 pixeles de ancho; xf = 0 -> copia directa */
+static void vid_hline(const void *data, unsigned w, unsigned h, size_t pitch, unsigned sy,
+                      const unsigned *x0, const unsigned *x1, const unsigned *xf, uint32_t *out)
+{
+    unsigned x;
+    if (g_rot == 0 && g_pixfmt == RETRO_PIXEL_FORMAT_RGB565) {       /* camino rapido (el de FBA 2012): tabla de 64K colores */
+        static uint32_t lut[65536];
+        static int lut_ok;
+        const uint16_t *row = (const uint16_t *)((const uint8_t *)data + (size_t)sy * pitch);
+        if (!lut_ok) {
+            unsigned q;
+            for (q = 0; q < 65536; q++) {
+                uint32_t r = (q >> 11) & 31, g = (q >> 5) & 63, b = q & 31;
+                lut[q] = 0xFF000000u | (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
+            }
+            lut_ok = 1;
+        }
+        for (x = 0; x < SCR_W; x++) {
+            uint32_t a = lut[row[x0[x]]];
+            out[x] = xf[x] ? vid_mix(a, lut[row[x1[x]]], xf[x]) : a;
+        }
+        return;
+    }
+    for (x = 0; x < SCR_W; x++) {
+        uint32_t a = vid_px(data, w, h, pitch, x0[x], sy);
+        if (xf[x]) a = vid_mix(a, vid_px(data, w, h, pitch, x1[x], sy), xf[x]);
+        out[x] = a;
+    }
+}
+
+/* Arcade Station: la imagen del nucleo (CPS1 = 384x224, otras 320x240, 256x224...) se pasa al lienzo de 320x240.
+ * Escalado bilineal en enteros (igual en todas las consolas). Cada renglon origen se escala a lo ancho UNA vez y los
+ * renglones destino vecinos lo reutilizan (antes cada pixel leia 4 pixeles del origen: mucho mas lento). */
 static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
 {
     unsigned x, y, ew, eh;
-    uint32_t hsh = 2166136261u;
     unsigned x0[SCR_W], x1[SCR_W], xf[SCR_W];
+    static uint32_t line[2][SCR_W];
+    int tag[2] = { -1, -1 };
     uint64_t tm0 = now_us();
     if (!data) return;                      /* frame repetido: no hay cambios */
     g_vid_fresh = 1;
@@ -3638,27 +3673,31 @@ static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
         int c = (int)(((2u * y + 1u) * eh * 128u) / SCR_H) - 128;
         unsigned y0, y1, yf;
         uint32_t *dst = &g_fb[y * SCR_W];
+        const uint32_t *la, *lb;
+        int k;
         if (c < 0) c = 0;
         y0 = (unsigned)c >> 8;
         if (y0 > eh - 1) y0 = eh - 1;
         y1 = y0 + 1 < eh ? y0 + 1 : y0;
         yf = (unsigned)c & 255u;
-        if (ew == SCR_W && eh == SCR_H) {
-            for (x = 0; x < SCR_W; x++) dst[x] = vid_px(data, w, h, pitch, x, y);
-            continue;
-        }
-        for (x = 0; x < SCR_W; x++) {
-            uint32_t top = vid_px(data, w, h, pitch, x0[x], y0);
-            uint32_t bot = vid_px(data, w, h, pitch, x0[x], y1);
-            if (xf[x]) {
-                top = vid_mix(top, vid_px(data, w, h, pitch, x1[x], y0), xf[x]);
-                bot = vid_mix(bot, vid_px(data, w, h, pitch, x1[x], y1), xf[x]);
-            }
-            dst[x] = yf ? vid_mix(top, bot, yf) : top;
+        /* renglon y0 -> linea 'la', renglon y1 -> linea 'lb' (se reutiliza lo ya calculado) */
+        if (tag[0] == (int)y0) k = 0; else if (tag[1] == (int)y0) k = 1; else k = -1;
+        if (k < 0) { k = (tag[0] == (int)y1) ? 1 : 0; vid_hline(data, w, h, pitch, y0, x0, x1, xf, line[k]); tag[k] = (int)y0; }
+        la = line[k];
+        if (yf && y1 != y0) {
+            int m = 1 - k;
+            if (tag[m] != (int)y1) { vid_hline(data, w, h, pitch, y1, x0, x1, xf, line[m]); tag[m] = (int)y1; }
+            lb = line[m];
+            for (x = 0; x < SCR_W; x++) dst[x] = vid_mix(la[x], lb[x], yf);
+        } else {
+            for (x = 0; x < SCR_W; x++) dst[x] = la[x];
         }
     }
-    for (y = 0; y < SCR_W * SCR_H; y++) hsh = fnv_u32(hsh, g_fb[y]);
-    g_frame_crc = hsh;
+    if (g_need_crc) {
+        uint32_t hsh = 2166136261u;
+        for (y = 0; y < SCR_W * SCR_H; y++) hsh = fnv_u32(hsh, g_fb[y]);
+        g_frame_crc = hsh;
+    } else g_frame_crc = 0;
     g_tm_scale += now_us() - tm0;
 }
 
@@ -5444,6 +5483,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
     g_stage = role == 0 ? "juego-host" : role == 1 ? "juego-cliente" : "juego-local";
     stage0 = g_stage;
     g_ingame = 1;                           /* v1.9.3: desde aqui la imagen usa la pantalla elegida en OPCIONES */
+    g_need_crc = (role != -1);              /* solo en SOLO no se compara nada con otra consola: se ahorra el hash de cada cuadro */
     memset(&g_gsw, 0, sizeof g_gsw); g_gsw.go = NO_FRAME; g_sw_pending = 0;      /* v1.9.2: cambio de juego */
     g_ka_on = role >= 0; g_ka_last = now_ms();
     g_ni_t0 = 0; g_ni_last = 0; g_ni_fps = 0;
@@ -5612,6 +5652,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
     }
 out:
     g_ingame = 0;                           /* v1.9.3: al salir de la partida, los menus vuelven a MENU_SCREEN */
+    g_need_crc = 1;
     g_ka_on = 0;
     free(st_in);                            /* v1.9.4: estado pendiente que nunca llego a cargarse */
     st_in = NULL;
@@ -5669,6 +5710,7 @@ static int session_loop4(int role, int D, uint32_t maxframes)
     g_stage = role == 0 ? "juego4-host" : role == 1 ? "juego4-cliente" : "juego4-ref";
     stage0 = g_stage;
     g_ingame = 1;                           /* v1.9.3: desde aqui la imagen usa la pantalla elegida en OPCIONES */
+    g_need_crc = (role != -1);              /* solo en SOLO no se compara nada con otra consola: se ahorra el hash de cada cuadro */
     memset(&g_gsw, 0, sizeof g_gsw); g_gsw.go = NO_FRAME; g_sw_pending = 0;      /* v1.9.2: cambio de juego */
     g_ka_on = role >= 0; g_ka_last = now_ms();
     g_ni_t0 = 0; g_ni_last = 0; g_ni_fps = 0;
@@ -5826,6 +5868,7 @@ static int session_loop4(int role, int D, uint32_t maxframes)
     }
 out:
     g_ingame = 0;                           /* v1.9.3: al salir de la partida, los menus vuelven a MENU_SCREEN */
+    g_need_crc = 1;
     g_ka_on = 0;
     free(st_in);                            /* v1.9.4: estado pendiente que nunca llego a cargarse */
     st_in = NULL;
