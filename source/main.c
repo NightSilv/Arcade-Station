@@ -184,6 +184,22 @@ static uint32_t now_ms(void)
 
 static void sleep_ms(int ms) { usleep((useconds_t)ms * 1000); }
 
+/* Arcade Station: reloj fino (microsegundos) y acumuladores para saber donde se va el tiempo de cada cuadro.
+ * Cada 120 cuadros el latido los escribe en arcade.log (por cuadro, en microsegundos). */
+static uint64_t now_us(void)
+{
+#ifdef NESNET_PS3
+    u64 s, n;
+    sysGetCurrentTime(&s, &n);
+    return (uint64_t)s * 1000000ULL + (uint64_t)(n / 1000ULL);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
+#endif
+}
+static uint64_t g_tm_run, g_tm_scale, g_tm_draw, g_tm_pres;   /* retro_run entero, video_cb, dibujo a pantalla, present entero */
+
 static void logf_(const char *fmt, ...)
 {
     char buf[256];
@@ -224,7 +240,14 @@ static const char *g_stage = "inicio";
 static uint32_t    g_hb;
 static void heartbeat(void)
 {
-    if (++g_hb % 120 == 0) logf_("latido %u fase=%s", (unsigned)g_hb, g_stage);
+    if (++g_hb % 120 == 0) {
+        logf_("latido %u fase=%s", (unsigned)g_hb, g_stage);
+        if (g_tm_run || g_tm_pres)
+            logf_("tiempos por cuadro (us): nucleo=%u escalado=%u dibujo=%u present_total=%u",
+                  (unsigned)((g_tm_run - g_tm_scale) / 120u), (unsigned)(g_tm_scale / 120u),
+                  (unsigned)(g_tm_draw / 120u), (unsigned)(g_tm_pres / 120u));
+        g_tm_run = g_tm_scale = g_tm_draw = g_tm_pres = 0;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -3263,10 +3286,14 @@ static void gpu_blit_canvas(void)
 
 static void present(void)
 {
+    uint64_t t0 = now_us(), t1;
     gpu_blit_canvas();
     g_stage = "gpu-flip";
+    t1 = now_us();
     gpu_flip();
     g_stage = "ok";
+    g_tm_draw += now_us() - t1;
+    g_tm_pres += now_us() - t0;
     heartbeat();
 }
 
@@ -3590,6 +3617,7 @@ static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
     unsigned x, y, ew, eh;
     uint32_t hsh = 2166136261u;
     unsigned x0[SCR_W], x1[SCR_W], xf[SCR_W];
+    uint64_t tm0 = now_us();
     if (!data) return;                      /* frame repetido: no hay cambios */
     g_vid_fresh = 1;
     if (w < 1) w = 1;
@@ -3631,6 +3659,7 @@ static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch)
     }
     for (y = 0; y < SCR_W * SCR_H; y++) hsh = fnv_u32(hsh, g_fb[y]);
     g_frame_crc = hsh;
+    g_tm_scale += now_us() - tm0;
 }
 
 static void audio_cb(int16_t l, int16_t r) { int16_t s2[2]; s2[0] = l; s2[1] = r; au_push(s2, 1); }
@@ -4191,9 +4220,11 @@ static void shot_do(void)
 
 static void step_frame(uint16_t p1, uint16_t p2)
 {
+    uint64_t t0 = now_us();
     g_pad[0] = p1;
     g_pad[1] = p2;
     retro_run();
+    g_tm_run += now_us() - t0;
 }
 
 /* v1.8: copia de step_frame() para 4 mandos */
@@ -4203,7 +4234,7 @@ static void step_frame4(uint16_t p1, uint16_t p2, uint16_t p3, uint16_t p4)
     g_pad[1] = p2;
     g_pad[2] = p3;
     g_pad[3] = p4;
-    retro_run();
+    retro_run();   /* (en el modo de 4 no se mide el tiempo del nucleo) */
 }
 
 /* ------------------------------------------------------------------ */
