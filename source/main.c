@@ -2441,6 +2441,16 @@ static void au_close(void) {}
 
 /* AUDIO-GENERIC-BEGIN */
 static int      g_volume = 100;        /* v1.9: volumen 0..100 (100 = igual que siempre) */
+/* Arcade Station: la app va clavada a 60 cuadros/s (vsync) y el nucleo entrega SIEMPRE el mismo numero de muestras por cuadro,
+ * aunque declare 59,6 cuadros/s (CPS1: 31831 Hz declarados, pero llegan 32040). Esa diferencia de 0,66 % se comia casi todo el
+ * ajuste fino de +-1 % y dejaba que la cola de audio creciera (retraso). Se corrige la frecuencia de entrada a lo que de verdad llega. */
+static void au_set_inrate(double sample_rate, double fps)
+{
+    if (sample_rate < 8000.0 || sample_rate > 96000.0) return;
+    g_au_inrate = sample_rate;
+    if (fps >= 40.0 && fps <= 70.0) g_au_inrate = sample_rate * (60.0 / fps);
+}
+
 static void au_reset(void)
 {
     g_aq_head = 0; g_aq_cnt = 0; g_aq_pos = 0.0;
@@ -2504,17 +2514,28 @@ static void au_silence_block(float *o)
 
 /* Un bloque real: interpolacion lineal entre muestras de entrada. El que llama garantiza que
  * hay suficiente entrada (au_need). */
-static int au_need(double step) { return (int)(g_aq_pos + AU_BLK * step) + 2; }
+static int au_need(double step) { return (int)(g_aq_pos + AU_BLK * step) + 4; }   /* +4: la interpolacion cubica mira 1 muestra antes y 2 despues */
 
 static void au_real_block(float *o, double step)
 {
     int i, n;
     for (i = 0; i < AU_BLK; i++) {
         int k = (int)g_aq_pos;
-        double fr = g_aq_pos - (double)k;
-        unsigned a = (g_aq_head + (unsigned)k) % AU_QCAP, b = (g_aq_head + (unsigned)k + 1) % AU_QCAP;
-        double l = (double)g_aq[a * 2]     + ((double)g_aq[b * 2]     - (double)g_aq[a * 2])     * fr;
-        double r = (double)g_aq[a * 2 + 1] + ((double)g_aq[b * 2 + 1] - (double)g_aq[a * 2 + 1]) * fr;
+        double t = g_aq_pos - (double)k, t2 = t * t, t3 = t2 * t;
+        unsigned ia = (g_aq_head + (unsigned)(k > 0 ? k - 1 : 0)) % AU_QCAP;
+        unsigned ib = (g_aq_head + (unsigned)k) % AU_QCAP;
+        unsigned ic = (g_aq_head + (unsigned)k + 1) % AU_QCAP;
+        unsigned id = (g_aq_head + (unsigned)k + 2) % AU_QCAP;
+        double l, r;
+        /* interpolacion cubica (Catmull-Rom) en vez de lineal: menos "suciedad" al subir de 32 kHz a 48 kHz */
+        {
+            double p0 = g_aq[ia * 2], p1 = g_aq[ib * 2], p2 = g_aq[ic * 2], p3 = g_aq[id * 2];
+            l = 0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3);
+            p0 = g_aq[ia * 2 + 1]; p1 = g_aq[ib * 2 + 1]; p2 = g_aq[ic * 2 + 1]; p3 = g_aq[id * 2 + 1];
+            r = 0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3);
+        }
+        if (l > 32767.0) l = 32767.0; else if (l < -32768.0) l = -32768.0;
+        if (r > 32767.0) r = 32767.0; else if (r < -32768.0) r = -32768.0;
         g_au_ll = (float)(l / 32768.0); g_au_lr = (float)(r / 32768.0);
         o[i * 2] = g_au_ll; o[i * 2 + 1] = g_au_lr;
         g_aq_pos += step;
@@ -3538,6 +3559,68 @@ static void core_log_cb(enum retro_log_level level, const char *fmt, ...)
     if (n == 600) logf_("nucleo: demasiados mensajes, se dejan de guardar");
 }
 
+/* Arcade Station: interruptores DIP de cada juego. El nucleo (FBA 2012) los pide como variables con nombre
+ *   fbalpha2012_dipswitch_<juego>_<nombre con _ en vez de espacios>
+ * y si la app no responde usa el valor por defecto (en Moonwalker: "2 Players", por eso solo salian 2 jugadores).
+ * Tabla propia + archivo USRDIR/dips.txt (una linea por ajuste:  juego|Nombre del interruptor|Valor), por ejemplo:
+ *   mwalkbl|Play Mode|3 Players
+ *   mwalkbl|Lives|3
+ * Las lineas de dips.txt mandan sobre la tabla. Si el valor no existe en ese juego, el nucleo lo ignora. */
+struct dip_ov { char key[96]; char val[48]; };
+static struct dip_ov g_dips[64];
+static int g_ndips;
+static int g_dips_loaded;
+
+static void dip_add(const char *rom, const char *name, const char *val)
+{
+    char k[96];
+    size_t i;
+    int j;
+    if (!rom[0] || !name[0] || !val[0]) return;
+    snprintf(k, sizeof k, "%s_%s", rom, name);
+    for (i = 0; k[i]; i++) if (k[i] == ' ' || k[i] == '=') k[i] = '_';
+    for (j = 0; j < g_ndips; j++)
+        if (!strcmp(g_dips[j].key, k)) { snprintf(g_dips[j].val, sizeof g_dips[j].val, "%s", val); return; }
+    if (g_ndips >= 64) return;
+    snprintf(g_dips[g_ndips].key, sizeof g_dips[g_ndips].key, "%s", k);
+    snprintf(g_dips[g_ndips].val, sizeof g_dips[g_ndips].val, "%s", val);
+    g_ndips++;
+}
+
+static void dips_load(void)
+{
+    char path[300], line[200];
+    FILE *f;
+    g_ndips = 0; g_dips_loaded = 1;
+    dip_add("mwalkbl", "Play Mode", "3 Players");        /* Moonwalker (bootleg): 3 jugadores */
+    dip_add("mwalk",   "Play Mode", "3 Players");
+    snprintf(path, sizeof path, "%s/dips.txt", g_dir);
+    f = fopen(path, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        char *a = line, *b, *c, *e;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        b = strchr(a, '|'); if (!b) continue; *b++ = 0;
+        c = strchr(b, '|'); if (!c) continue; *c++ = 0;
+        for (e = c + strlen(c); e > c && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' '); ) *--e = 0;
+        dip_add(a, b, c);
+    }
+    fclose(f);
+    logf_("dips.txt: %d ajuste(s) de interruptores DIP", g_ndips);
+}
+
+static const char *dip_lookup(const char *key)
+{
+    const char *p = strstr(key, "_dipswitch_");
+    int j;
+    if (!p) return NULL;
+    p += 11;
+    if (!g_dips_loaded) dips_load();
+    for (j = 0; j < g_ndips; j++)
+        if (!strcmp(g_dips[j].key, p)) { logf_("dip: %s = %s", p, g_dips[j].val); return g_dips[j].val; }
+    return NULL;
+}
+
 static bool env_cb(unsigned cmd, void *data)
 {
     switch (cmd) {
@@ -3556,6 +3639,13 @@ static bool env_cb(unsigned cmd, void *data)
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
         ((struct retro_log_callback *)data)->log = core_log_cb;
         return true;
+    case RETRO_ENVIRONMENT_GET_VARIABLE: {
+        struct retro_variable *v = (struct retro_variable *)data;
+        const char *val = v && v->key ? dip_lookup(v->key) : NULL;
+        if (!val) return false;               /* sin cambio: el nucleo usa su valor por defecto */
+        v->value = val;
+        return true;
+    }
     case RETRO_ENVIRONMENT_GET_CAN_DUPE:
         *(bool *)data = true;
         return true;
@@ -3874,7 +3964,7 @@ static int core_load(void)
         struct retro_system_av_info av;
         memset(&av, 0, sizeof av);
         retro_get_system_av_info(&av);
-        if (av.timing.sample_rate >= 8000.0 && av.timing.sample_rate <= 96000.0) g_au_inrate = av.timing.sample_rate;
+        au_set_inrate(av.timing.sample_rate, av.timing.fps);
         logf_("video: base %ux%u  audio: %d Hz a %d cuadros/s", av.geometry.base_width, av.geometry.base_height, (int)g_au_inrate, (int)(av.timing.fps + 0.5));
     }
     g_core_loaded = 1;
@@ -3903,7 +3993,7 @@ static int core_load4(void)
         struct retro_system_av_info av;
         memset(&av, 0, sizeof av);
         retro_get_system_av_info(&av);
-        if (av.timing.sample_rate >= 8000.0 && av.timing.sample_rate <= 96000.0) g_au_inrate = av.timing.sample_rate;
+        au_set_inrate(av.timing.sample_rate, av.timing.fps);
         logf_("audio: el nucleo entrega %d Hz a %d cuadros/s", (int)g_au_inrate, (int)(av.timing.fps + 0.5));
     }
     g_core_loaded = 1;
