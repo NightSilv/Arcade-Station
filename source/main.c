@@ -238,9 +238,27 @@ static void pump(void);   /* atiende al sistema (boton PS, etc.) */
  * cuelga, la ultima linea del log dice cuando y en que fase paso. */
 static const char *g_stage = "inicio";
 static uint32_t    g_hb;
+/* Arcade Station: salto de dibujo automatico (solo SOLO). Si el juego tarda mas de 1/60 s por cuadro (Moonwalker), se acumula una "deuda"
+ * de tiempo; al pasar de 6 ms se emula el cuadro SIN dibujar (el nucleo salta el dibujo y no se escala ni se presenta) y se espera lo justo
+ * para que la deuda quede en 0. Asi la velocidad del juego y el audio quedan a 60 por segundo y solo se pierden algunas imagenes.
+ * Un juego que ya va a 60 nunca acumula deuda: nunca salta nada. */
+#ifdef NESNET_PS3
+extern void fba_skip_draw(int);
+static void core_skip_draw(int s) { fba_skip_draw(s); }
+#else
+static void core_skip_draw(int s) { (void)s; }
+#endif
+static int64_t  g_debt;
+static uint64_t g_fs_prev;
+static int      g_skip_run;
+static uint32_t g_skipped;
+#define SKIP_ON_US   6000
+#define SKIP_MAXRUN  3
+
 static void heartbeat(void)
 {
     if (++g_hb % 120 == 0) {
+        if (g_skipped) { logf_("saltos de dibujo (automatico): %u en total", (unsigned)g_skipped); }
         logf_("latido %u fase=%s", (unsigned)g_hb, g_stage);
         if (g_tm_run || g_tm_pres)
             logf_("tiempos por cuadro (us): nucleo=%u escalado=%u dibujo=%u present_total=%u",
@@ -3594,6 +3612,8 @@ static void dips_load(void)
     g_ndips = 0; g_dips_loaded = 1;
     dip_add("mwalkbl", "Play Mode", "3 Players");        /* Moonwalker (bootleg): 3 jugadores */
     dip_add("mwalk",   "Play Mode", "3 Players");
+    dip_add("mwalkbl", "Coin Chute", "Individual");      /* "Common" = una sola ranura: solo contaba la moneda del jugador 1 */
+    dip_add("mwalk",   "Coin Chute", "Individual");
     snprintf(path, sizeof path, "%s/dips.txt", g_dir);
     f = fopen(path, "r");
     if (!f) return;
@@ -5589,8 +5609,10 @@ static int session_loop(int role, int D, uint32_t maxframes)
 
     (void)shot_pressed(1, 0); g_shot_req = 0;          /* v1.9.6: lo mismo con L2 (captura) */
 
+    g_fs_prev = 0; g_debt = 0; g_skip_run = 0;
     while (g_running && (maxframes == 0 || frame < maxframes)) {
         uint16_t p1, p2;
+        int skip_now = 0;
         pump();
         /* v1.9.2: cambio de juego: llego el cuadro de corte (se mira ANTES de mandar la entrada de este cuadro) */
         if (g_gsw.go != NO_FRAME && frame >= g_gsw.go) { g_sw_pending = 1; goto out; }
@@ -5717,8 +5739,29 @@ static int session_loop(int role, int D, uint32_t maxframes)
         if (role == -1) {                    /* Arcade Station: solo local, hasta 4 mandos segun el juego */
             g_pad[2] = g_nplayers >= 3 ? local_bits(2, 2, frame) : 0;
             g_pad[3] = g_nplayers >= 4 ? local_bits(3, 3, frame) : 0;
+            {   /* salto de dibujo automatico: mide cuanto tardo el cuadro anterior (de inicio a inicio) */
+                uint64_t nw = now_us();
+                if (g_fs_prev && frame > 2) {
+                    int64_t T = (int64_t)(nw - g_fs_prev);
+                    if (T > 100000) g_debt = 0;                          /* menu, pausa o carga: no cuenta */
+                    else if (T > 17500) g_debt += T - 16667;             /* perdio el cuadro de pantalla */
+                    else { g_debt -= 16700 - T; if (g_debt < 0) g_debt = 0; }
+                } else g_debt = 0;
+                g_fs_prev = nw;
+                skip_now = (g_debt > SKIP_ON_US && g_skip_run < SKIP_MAXRUN && !g_shot_req && (frame % 300) != 299) ? 1 : 0;
+                core_skip_draw(skip_now);
+            }
         }
         step_frame(p1, p2);
+        if (skip_now) {                      /* cuadro sin dibujar: espera lo justo para pagar la deuda y sigue */
+            int64_t want = 16667 - g_debt;
+            while ((int64_t)(now_us() - g_fs_prev) < want) { pump(); usleep(300); }
+            g_skip_run++; g_skipped++;
+            frame++;
+            g_frames_done = frame;
+            continue;
+        }
+        g_skip_run = 0;
         if (g_shot_req && g_vid_fresh) { g_shot_req = 0; shot_do(); }   /* v1.9.6: captura limpia: g_fb todavia no tiene textos */
 
         mine_f[frame % RING] = frame;
@@ -5741,6 +5784,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
         if (role == -1 && (frame % 300) == 0) sram_save(0);      /* v1.9: guardado de bateria cada ~5 s si cambio (solo SOLO) */
     }
 out:
+    core_skip_draw(0); g_fs_prev = 0; g_debt = 0; g_skip_run = 0;
     g_ingame = 0;                           /* v1.9.3: al salir de la partida, los menus vuelven a MENU_SCREEN */
     g_need_crc = 1;
     g_ka_on = 0;
