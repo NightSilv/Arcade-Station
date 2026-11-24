@@ -252,6 +252,7 @@ static int64_t  g_debt;
 static uint64_t g_fs_prev;
 static int      g_skip_run;
 static uint32_t g_skipped;
+static int      g_noskip;       /* 1 si existe USRDIR/noskip.txt: apaga el salto de dibujo (para comparar) */
 #define SKIP_ON_US   6000
 #define SKIP_MAXRUN  3
 
@@ -3612,8 +3613,6 @@ static void dips_load(void)
     g_ndips = 0; g_dips_loaded = 1;
     dip_add("mwalkbl", "Play Mode", "3 Players");        /* Moonwalker (bootleg): 3 jugadores */
     dip_add("mwalk",   "Play Mode", "3 Players");
-    dip_add("mwalkbl", "Coin Chute", "Individual");      /* "Common" = una sola ranura: solo contaba la moneda del jugador 1 */
-    dip_add("mwalk",   "Coin Chute", "Individual");
     snprintf(path, sizeof path, "%s/dips.txt", g_dir);
     f = fopen(path, "r");
     if (!f) return;
@@ -3835,6 +3834,13 @@ static int16_t input_state_cb(unsigned port, unsigned dev, unsigned idx, unsigne
     case RETRO_DEVICE_ID_JOYPAD_L2:     bit = 12; break;
     case RETRO_DEVICE_ID_JOYPAD_R2:     bit = 13; break;
     default: return 0;
+    }
+    if (bit == 2 || bit == 3) {      /* diagnostico: avisa en el log cada vez que el nucleo lee SELECT (moneda) o START apretado */
+        static uint8_t prev[4][2];
+        int v = (g_pad[port] >> bit) & 1;
+        if (v && !prev[port][bit - 2]) logf_("%s: el nucleo lee el boton del puerto %u (mando %u)", bit == 2 ? "moneda" : "start", port, port + 1);
+        prev[port][bit - 2] = (uint8_t)v;
+        return (int16_t)v;
     }
     return (g_pad[port] >> bit) & 1;
 }
@@ -5610,6 +5616,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
     (void)shot_pressed(1, 0); g_shot_req = 0;          /* v1.9.6: lo mismo con L2 (captura) */
 
     g_fs_prev = 0; g_debt = 0; g_skip_run = 0;
+    { char np[300]; FILE *nf; snprintf(np, sizeof np, "%s/noskip.txt", g_dir); nf = fopen(np, "r"); g_noskip = nf ? 1 : 0; if (nf) fclose(nf); logf_("salto de dibujo automatico: %s", g_noskip ? "APAGADO (noskip.txt)" : "activo"); }
     while (g_running && (maxframes == 0 || frame < maxframes)) {
         uint16_t p1, p2;
         int skip_now = 0;
@@ -5737,8 +5744,8 @@ static int session_loop(int role, int D, uint32_t maxframes)
 #endif
         g_vid_fresh = 0;
         if (role == -1) {                    /* Arcade Station: solo local, hasta 4 mandos segun el juego */
-            g_pad[2] = g_nplayers >= 3 ? local_bits(2, 2, frame) : 0;
-            g_pad[3] = g_nplayers >= 4 ? local_bits(3, 3, frame) : 0;
+            g_pad[2] = local_bits(2, 2, frame);      /* siempre se leen los 4 mandos: el nucleo a veces declara menos jugadores de los reales (kod: 2 en vez de 3) */
+            g_pad[3] = local_bits(3, 3, frame);
             {   /* salto de dibujo automatico: mide cuanto tardo el cuadro anterior (de inicio a inicio) */
                 uint64_t nw = now_us();
                 if (g_fs_prev && frame > 2) {
@@ -5748,7 +5755,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
                     else { g_debt -= 16700 - T; if (g_debt < 0) g_debt = 0; }
                 } else g_debt = 0;
                 g_fs_prev = nw;
-                skip_now = (g_debt > SKIP_ON_US && g_skip_run < SKIP_MAXRUN && !g_shot_req && (frame % 300) != 299) ? 1 : 0;
+                skip_now = (!g_noskip && g_debt > SKIP_ON_US && g_skip_run < SKIP_MAXRUN && !g_shot_req && (frame % 300) != 299) ? 1 : 0;
                 core_skip_draw(skip_now);
             }
         }
