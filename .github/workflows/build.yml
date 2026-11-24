@@ -133,6 +133,13 @@ jobs:
             perl -0pi -e 's/free\(g_fba_frame\);/{ free(g_fba_frame); g_fba_frame = NULL; }/' src/burner/libretro/libretro.cpp
           fi
           grep -q "g_fba_frame = NULL" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de g_fba_frame"; exit 1; }
+          # 7) salto de dibujo: fba_skip_draw(1) hace que retro_run no dibuje (pBurnDraw = NULL) y avise "cuadro repetido" (video_cb con NULL)
+          if ! grep -q "fba_skip_draw" src/burner/libretro/libretro.cpp; then
+            perl -0pi -e 's/void retro_run\(\)\n\{/static int g_skipdraw;\nextern "C" void fba_skip_draw(int s) { g_skipdraw = s; }\n\nvoid retro_run()\n{/' src/burner/libretro/libretro.cpp
+            perl -0pi -e 's/pBurnDraw = \(uint8_t\*\)g_fba_frame;\n\n   InputMake\(\);/pBurnDraw = g_skipdraw ? NULL : (uint8_t*)g_fba_frame;\n\n   InputMake();/' src/burner/libretro/libretro.cpp
+            perl -0pi -e 's/video_cb\(g_fba_frame, width, height, nBurnPitch\);/video_cb(g_skipdraw ? NULL : g_fba_frame, width, height, nBurnPitch);/' src/burner/libretro/libretro.cpp
+          fi
+          grep -q "fba_skip_draw" src/burner/libretro/libretro.cpp && grep -q "g_skipdraw ? NULL : (uint8_t" src/burner/libretro/libretro.cpp && grep -q "video_cb(g_skipdraw" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de salto de dibujo"; exit 1; }
 
       - name: Compilar nucleo FB Alpha 2012 (solo arcade) con platform=psl1ght
         run: |
