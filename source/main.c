@@ -70,7 +70,7 @@ int closesocket(int s);      /* definida en libnet, pero sin prototipo en las ca
  * Una v1.9.3 y una v1.9.4 se rechazan en el saludo en vez de desincronizarse. */
 /* v1.9.6: captura de pantalla con L2 (local, no toca la red): el protocolo NO cambia, 1vs1 = 7 y modo de 4 = 8 como en la v1.9.5. */
 /* Katari v0.1: protocolo propio, distinto del de NesNet (7/8): un Katari y un NesNet se rechazan en el saludo. */
-#define PROTO_VER      35
+#define PROTO_VER      41
 #define DEFAULT_PORT   7780        /* NesNet 7777, SilverSky 7778, Katari 7779, Arcade Station 7780 */
 #define SCR_W          320        /* Arcade Station: lienzo 320x240 (x3 = 960x720, 4:3 a 720p) */
 #define SCR_H          240
@@ -84,11 +84,12 @@ int closesocket(int s);      /* definida en libnet, pero sin prototipo en las ca
 #define MODE_JOIN      2
 #define MODE_ROM       3      /* v1.7: opcion "ELEGIR ROM" del menu (no es un modo de juego) */
 #define MODE_FOUR      4      /* v1.8: opcion "MULTIJUGADOR DE 4" (submenu con host y unirse) */
+#define MODE_ONLINE    6      /* Arcade Station: JUGAR ONLINE (1vs1 y multijugador) */
 #define MODE_OPT       5      /* v1.8.2: opcion "OPCIONES" del menu (pantalla y mandos; no es un modo de juego) */
 
 /* v1.8: el modo de 4 jugadores es una COPIA aparte del 1vs1 y habla otro protocolo, asi un host de 1vs1
  * nunca acepta a alguien del modo de 4 (ni al reves). Desde la v1.9.2: 1vs1 = 5, modo de 4 = 6. */
-#define PROTO_VER4     36
+#define PROTO_VER4     42
 
 /* FCEUmm define su "GAMEPAD" como subclase 1 del mando (RETRO_DEVICE_GAMEPAD en su libretro.c) */
 #define NES_DEV_GAMEPAD RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 1)
@@ -242,7 +243,7 @@ static uint32_t    g_hb;
  * de tiempo; al pasar de 6 ms se emula el cuadro SIN dibujar (el nucleo salta el dibujo y no se escala ni se presenta) y se espera lo justo
  * para que la deuda quede en 0. Asi la velocidad del juego y el audio quedan a 60 por segundo y solo se pierden algunas imagenes.
  * Un juego que ya va a 60 nunca acumula deuda: nunca salta nada. */
-#ifdef NESNET_PS3
+#if defined(NESNET_PS3) || defined(ARCADE_TEST_SKIP)
 extern void fba_skip_draw(int);
 static void core_skip_draw(int s) { fba_skip_draw(s); }
 #else
@@ -3551,7 +3552,7 @@ static uint16_t script_input(int slot, uint32_t f)
     uint32_t x = (f / 6 + 1) * 2654435761u ^ ((uint32_t)(slot + 1) * 40503u * 2246822519u);
     uint16_t b;
     x ^= x >> 15; x *= 2246822519u; x ^= x >> 13; x *= 3266489917u; x ^= x >> 16;
-    b = (uint16_t)(x & 0xFF);
+    b = (uint16_t)(x & 0x3FFF);                  /* Arcade Station: 14 bits (6 botones y L2/R2), no solo los 8 de NES */
     if ((b & NB_UP) && (b & NB_DOWN))   b &= ~NB_DOWN;
     if ((b & NB_LEFT) && (b & NB_RIGHT)) b &= ~NB_RIGHT;
     return b;
@@ -3961,6 +3962,7 @@ static void core_boot(void)
 }
 
 static int g_core_dirty;                  /* 1 = ya se cargo un juego: antes de otro hay que reiniciar el nucleo (retro_deinit + retro_init) */
+static int g_mode4;                       /* Arcade Station: multijugador online: 0 = 2vs2, 1 = 2vs1 (host 2 mandos, amigo 1), 2 = 1vs2 (host 1, amigo 2) */
 static int g_nplayers = 2;                /* Arcade Station: jugadores del juego cargado (2 por defecto, maximo 4) */
 static int core_load(void)
 {
@@ -4395,7 +4397,7 @@ static void step_frame4(uint16_t p1, uint16_t p2, uint16_t p3, uint16_t p4)
 /* ------------------------------------------------------------------ */
 /* Red: mensajes de 16 bytes, TCP, poll() con espera propia            */
 /* ------------------------------------------------------------------ */
-enum { M_HELLO = 1, M_PING, M_PONG, M_CFG, M_START, M_INPUT, M_QUIT, M_REJECT, M_RESET, M_GAME, M_STATE };   /* v1.9.1: M_RESET (frame = cuadro en que ambos reinician); v1.9.2: M_GAME (cambio de juego) */
+enum { M_HELLO = 1, M_PING, M_PONG, M_CFG, M_START, M_INPUT, M_QUIT, M_REJECT, M_RESET, M_GAME, M_STATE, M_INPUT2 };   /* v1.9.1: M_RESET (frame = cuadro en que ambos reinician); v1.9.2: M_GAME (cambio de juego) */
 /* v1.9.4: M_STATE = el host manda un estado guardado: frame = cuadro en que los dos lo cargan, v1 = bytes, v2 = CRC32 de los datos;
  * justo despues de este mensaje de 16 bytes vienen v1 bytes sin marco (ver net_send_raw / net_recv_raw). */
 /* v1.9.2: M_GAME, campo 'a': pregunta del host (v1 = CRC32 de la ROM, v2 = tamano) / "la tengo" / "no la tengo" /
@@ -5051,11 +5053,12 @@ static int handshake_host4(int *outD)
     D = g_cfg.delay > 0 ? g_cfg.delay : clamp_i((int)((rtt[2] / 2 + 16) / 17) + 2, 3, 12);
     logf_("RTT mediana %u ms -> delay %d frames", (unsigned)rtt[2], D);
 
-    memset(&m, 0, sizeof m); m.type = M_CFG; m.v1 = (uint32_t)D; m.v2 = rtt[2];
+    memset(&m, 0, sizeof m); m.type = M_CFG; m.v1 = (uint32_t)D; m.v2 = rtt[2]; m.a = (uint8_t)g_mode4;   /* modo multijugador (2v2 / 2v1 / 1v2) */
     if (!net_send(&m)) { g_err = "SE CORTO LA CONEXION"; return 0; }
     memset(&m, 0, sizeof m); m.type = M_START;
     if (!net_send(&m)) { g_err = "SE CORTO LA CONEXION"; return 0; }
     *outD = D;
+    logf_("multijugador: modo %d (0=2v2 1=2v1 2=1v2)", g_mode4);
     return 1;
 }
 
@@ -5081,9 +5084,10 @@ static int handshake_client4(int *outD)
             Msg p; memset(&p, 0, sizeof p); p.type = M_PONG; p.v1 = m.v1;
             if (!net_send(&p)) { g_err = "SE CORTO LA CONEXION"; return 0; }
         } else if (m.type == M_CFG) {
-            D = (int)m.v1; haveD = 1;
+            D = (int)m.v1; haveD = 1; g_mode4 = m.a <= 2 ? (int)m.a : 0;
         } else if (m.type == M_START && haveD) {
             *outD = clamp_i(D, 1, 20);
+            logf_("multijugador: modo %d (0=2v2 1=2v1 2=1v2)", g_mode4);
             return 1;
         }
     }
@@ -5575,6 +5579,33 @@ static int state_online_guest_recv(const Msg *m, uint32_t frame, uint8_t **st_in
     return 1;
 }
 
+/* Arcade Station: salto de dibujo automatico (SOLO y online). Ver el comentario de g_debt. En online el tiempo que se pasa
+ * esperando al otro lado (g_netwait) NO cuenta como atraso propio. El hash de imagen de un cuadro saltado es 0 y no se compara. */
+static uint64_t g_netwait;
+static int skip_decide(void)
+{
+    uint64_t nw = now_us();
+    int sk;
+    if (g_fs_prev) {
+        int64_t T = (int64_t)(nw - g_fs_prev) - (int64_t)g_netwait;
+        if (T > 100000) g_debt = 0;                          /* menu, pausa o carga: no cuenta */
+        else if (T > 17500) g_debt += T - 16667;             /* perdio el cuadro de pantalla */
+        else { g_debt -= 16700 - T; if (g_debt < 0) g_debt = 0; }
+    } else g_debt = 0;
+    g_netwait = 0;
+    g_fs_prev = nw;
+    sk = (!g_noskip && g_debt > SKIP_ON_US && g_skip_run < SKIP_MAXRUN && !g_shot_req) ? 1 : 0;
+    core_skip_draw(sk);
+    if (sk) g_frame_crc = 0;
+    return sk;
+}
+static void skip_wait(void)       /* cuadro sin dibujar: espera lo justo para pagar la deuda */
+{
+    int64_t want = 16667 - g_debt;
+    while ((int64_t)(now_us() - g_fs_prev) < want) { pump(); usleep(300); }
+    g_skip_run++; g_skipped++;
+}
+
 static int session_loop(int role, int D, uint32_t maxframes)
 {
     /* v1.9.4: estado guardado pendiente de cargar en el cuadro st_in_F (el host lo lee de su ranura; el invitado lo recibe por red) */
@@ -5606,7 +5637,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
 
 #define COMPARE(f) do { uint32_t _f = (f); \
         if (mine_f[_f % RING] == _f && rem_f[_f % RING] == _f && \
-            mine_c[_f % RING] != rem_c[_f % RING]) { \
+            mine_c[_f % RING] && rem_c[_f % RING] && mine_c[_f % RING] != rem_c[_f % RING]) { \
             if (!g_desyncs) { g_first_desync = _f; logf_("DESYNC en frame %u", (unsigned)_f); } \
             g_desyncs++; \
             mine_f[_f % RING] = NO_FRAME; } } while (0)
@@ -5615,7 +5646,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
 
     (void)shot_pressed(1, 0); g_shot_req = 0;          /* v1.9.6: lo mismo con L2 (captura) */
 
-    g_fs_prev = 0; g_debt = 0; g_skip_run = 0;
+    g_fs_prev = 0; g_debt = 0; g_skip_run = 0; g_netwait = 0;
     { char np[300]; FILE *nf; snprintf(np, sizeof np, "%s/noskip.txt", g_dir); nf = fopen(np, "r"); g_noskip = nf ? 1 : 0; if (nf) fclose(nf); logf_("salto de dibujo automatico: %s", g_noskip ? "APAGADO (noskip.txt)" : "activo"); }
     while (g_running && (maxframes == 0 || frame < maxframes)) {
         uint16_t p1, p2;
@@ -5687,7 +5718,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
                     g_err = peer_quit ? "EL AMIGO SALIO DE LA PARTIDA" : "SE PERDIO LA CONEXION";
                     ended_ok = 0; goto out;
                 }
-                r = net_recv(&m, have[frame % RING] ? 0 : 100);
+                { int blk = !have[frame % RING]; uint64_t tw = now_us(); r = net_recv(&m, blk ? 100 : 0); if (blk) g_netwait += now_us() - tw; }
                 if (r < 0) { if (!g_running) goto out; peer_gone = 1; continue; }
                 if (r == 0) {
                     if (have[frame % RING]) break;
@@ -5746,29 +5777,9 @@ static int session_loop(int role, int D, uint32_t maxframes)
         if (role == -1) {                    /* Arcade Station: solo local, hasta 4 mandos segun el juego */
             g_pad[2] = local_bits(2, 2, frame);      /* siempre se leen los 4 mandos: el nucleo a veces declara menos jugadores de los reales (kod: 2 en vez de 3) */
             g_pad[3] = local_bits(3, 3, frame);
-            {   /* salto de dibujo automatico: mide cuanto tardo el cuadro anterior (de inicio a inicio) */
-                uint64_t nw = now_us();
-                if (g_fs_prev && frame > 2) {
-                    int64_t T = (int64_t)(nw - g_fs_prev);
-                    if (T > 100000) g_debt = 0;                          /* menu, pausa o carga: no cuenta */
-                    else if (T > 17500) g_debt += T - 16667;             /* perdio el cuadro de pantalla */
-                    else { g_debt -= 16700 - T; if (g_debt < 0) g_debt = 0; }
-                } else g_debt = 0;
-                g_fs_prev = nw;
-                skip_now = (!g_noskip && g_debt > SKIP_ON_US && g_skip_run < SKIP_MAXRUN && !g_shot_req && (frame % 300) != 299) ? 1 : 0;
-                core_skip_draw(skip_now);
-            }
         }
+        skip_now = role != -2 ? skip_decide() : 0;
         step_frame(p1, p2);
-        if (skip_now) {                      /* cuadro sin dibujar: espera lo justo para pagar la deuda y sigue */
-            int64_t want = 16667 - g_debt;
-            while ((int64_t)(now_us() - g_fs_prev) < want) { pump(); usleep(300); }
-            g_skip_run++; g_skipped++;
-            frame++;
-            g_frames_done = frame;
-            continue;
-        }
-        g_skip_run = 0;
         if (g_shot_req && g_vid_fresh) { g_shot_req = 0; shot_do(); }   /* v1.9.6: captura limpia: g_fb todavia no tiene textos */
 
         mine_f[frame % RING] = frame;
@@ -5776,6 +5787,9 @@ static int session_loop(int role, int D, uint32_t maxframes)
         if (role >= 0) COMPARE(frame);
         g_run_hash = fnv_u32(g_run_hash, g_frame_crc);
 
+        if (skip_now) skip_wait();
+        else {
+        g_skip_run = 0;
         if (role >= 0 && netinfo_show(frame)) {
             if (g_desyncs) snprintf(ov, sizeof ov, "DESYNC EN FRAME %u", (unsigned)g_first_desync);
             else if (g_netinfo == 1) snprintf(ov, sizeof ov, "P%d DELAY %d (%dMS) FPS %u TRABAS %u", role + 1, D, D * 17, (unsigned)g_ni_fps, (unsigned)g_ni_st);
@@ -5785,6 +5799,7 @@ static int session_loop(int role, int D, uint32_t maxframes)
         if (g_toast_n > 0) { ui_text(4, 224, g_toast, 1, 0xFFFFFF40); g_toast_n--; }
         if (g_showfps && role != -2) ui_fps();                           /* v1.9.2: FPS en pantalla (SOLO y online) */
         present();
+        }
         if ((role >= 0 && g_netinfo == 1) || (g_showfps && role != -2)) netinfo_tick();
         frame++;
         g_frames_done = frame;
@@ -5815,14 +5830,16 @@ out:
 /* Cada consola manda en un solo mensaje sus 2 mandos: byte bajo = mando 1 de esa consola, byte alto = mando 2.   */
 /* Host: mandos 1 y 2 (P1+P2). El que se une: mandos 3 y 4 (P3+P4).                                                */
 /* ------------------------------------------------------------------ */
-static uint16_t local_bits4(int role, uint32_t frame)
+/* Arcade Station: mando 'slot' (0 o 1) de ESTA consola en el modo multijugador. Segun g_mode4 cada consola usa 1 o 2 mandos. */
+static uint16_t local_pad4(int role, int slot, uint32_t frame)
 {
+    int n = role == 0 ? (g_mode4 == 2 ? 1 : 2) : (g_mode4 == 1 ? 1 : 2);
+    if (slot >= n) return 0;
 #ifdef NESNET_HOST
-    int base = role == 1 ? 2 : 0;           /* pruebas: host = jugadores 0 y 1, cliente = jugadores 2 y 3 */
-    return (uint16_t)(script_input(base, frame) | (script_input(base + 1, frame) << 8));
+    return script_input((role == 1 ? 2 : 0) + slot, frame);   /* pruebas: host = jugadores 0 y 1, cliente = jugadores 2 y 3 */
 #else
-    (void)role; (void)frame;
-    return (uint16_t)((pad_nes_bits(0) & 0xFF) | ((pad_nes_bits(1) & 0xFF) << 8));
+    (void)frame;
+    return pad_nes_bits(slot);
 #endif
 }
 
@@ -5834,7 +5851,8 @@ static int session_loop4(int role, int D, uint32_t maxframes)
     size_t st_in_n = 0;
     uint32_t st_in_F = NO_FRAME;
     const char *stage0;
-    uint16_t loc[RING], rem[RING];
+    uint16_t loc[RING], rem[RING], loc2[RING], rem2[RING];
+    int skip_now = 0;
     uint8_t  have[RING];
     uint32_t mine_f[RING], mine_c[RING], rem_f[RING], rem_c[RING];
     uint32_t frame = 0, last_rx = now_ms();
@@ -5842,11 +5860,14 @@ static int session_loop4(int role, int D, uint32_t maxframes)
     int i, ended_ok = 1, peer_gone = 0, peer_quit = 0, user_exit = 0;
     char ov[64];
 
+    memset(loc2, 0, sizeof loc2); memset(rem2, 0, sizeof rem2);
     memset(loc, 0, sizeof loc); memset(rem, 0, sizeof rem); memset(have, 0, sizeof have);
     for (i = 0; i < RING; i++) { mine_f[i] = NO_FRAME; rem_f[i] = NO_FRAME; mine_c[i] = rem_c[i] = 0; }
     for (i = 0; i < RST_MAX; i++) rst[i] = NO_FRAME;
     if (role >= 0) for (i = 0; i < D; i++) have[i] = 1;
 
+    g_fs_prev = 0; g_debt = 0; g_skip_run = 0; g_netwait = 0;
+    { char np[300]; FILE *nf; snprintf(np, sizeof np, "%s/noskip.txt", g_dir); nf = fopen(np, "r"); g_noskip = nf ? 1 : 0; if (nf) fclose(nf); logf_("salto de dibujo automatico: %s", g_noskip ? "APAGADO (noskip.txt)" : "activo"); }
     g_run_hash = 2166136261u; g_frames_done = 0; g_desyncs = 0; g_first_desync = NO_FRAME;
     g_stage = role == 0 ? "juego4-host" : role == 1 ? "juego4-cliente" : "juego4-ref";
     stage0 = g_stage;
@@ -5858,7 +5879,7 @@ static int session_loop4(int role, int D, uint32_t maxframes)
 
 #define COMPARE4(f) do { uint32_t _f = (f); \
         if (mine_f[_f % RING] == _f && rem_f[_f % RING] == _f && \
-            mine_c[_f % RING] != rem_c[_f % RING]) { \
+            mine_c[_f % RING] && rem_c[_f % RING] && mine_c[_f % RING] != rem_c[_f % RING]) { \
             if (!g_desyncs) { g_first_desync = _f; logf_("DESYNC en frame %u", (unsigned)_f); } \
             g_desyncs++; \
             mine_f[_f % RING] = NO_FRAME; } } while (0)
@@ -5902,19 +5923,25 @@ static int session_loop4(int role, int D, uint32_t maxframes)
 #ifdef NESNET_HOST
             uint32_t f0 = frame >= (uint32_t)D ? frame - (uint32_t)D : 0;
             int ok0 = frame >= (uint32_t)D;
-            p1 = ok0 ? script_input(0, f0) : 0;
-            p2 = ok0 ? script_input(1, f0) : 0;
-            p3 = ok0 ? script_input(2, f0) : 0;
-            p4 = ok0 ? script_input(3, f0) : 0;
+            uint16_t s0 = ok0 ? script_input(0, f0) : 0, s1 = g_mode4 == 2 ? 0 : ok0 ? script_input(1, f0) : 0;
+            uint16_t s2 = ok0 ? script_input(2, f0) : 0, s3 = g_mode4 == 1 ? 0 : ok0 ? script_input(3, f0) : 0;
+            if (g_mode4 == 1)      { p1 = s0; p2 = s1; p3 = s2; p4 = 0; }
+            else if (g_mode4 == 2) { p1 = s0; p2 = s2; p3 = s3; p4 = 0; }
+            else                   { p1 = s0; p2 = s1; p3 = s2; p4 = s3; }
 #else
             p1 = p2 = p3 = p4 = 0;           /* la referencia solo existe en la version de pruebas (PC) */
 #endif
         } else {
             Msg m;
             uint32_t tgt = frame + (uint32_t)D;
-            uint16_t bits = local_bits4(role, frame);
-            loc[tgt % RING] = bits;
+            uint16_t bits = local_pad4(role, 0, frame), bits2 = local_pad4(role, 1, frame);
+            loc[tgt % RING] = bits; loc2[tgt % RING] = bits2;
 
+            {   /* el segundo mando va en un mensaje aparte (antes del principal: TCP respeta el orden), cada mando con sus 16 bits */
+                Msg m2; memset(&m2, 0, sizeof m2);
+                m2.type = M_INPUT2; m2.input = bits2; m2.frame = tgt;
+                if (!peer_gone && !net_send(&m2)) peer_gone = 1;
+            }
             memset(&m, 0, sizeof m);
             m.type = M_INPUT; m.input = bits; m.frame = tgt;
             if (frame > 0) { m.v1 = frame - 1; m.v2 = mine_c[(frame - 1) % RING]; } else { m.v1 = NO_FRAME; }
@@ -5928,7 +5955,7 @@ static int session_loop4(int role, int D, uint32_t maxframes)
                     g_err = peer_quit ? "EL AMIGO SALIO DE LA PARTIDA" : "SE PERDIO LA CONEXION";
                     ended_ok = 0; goto out;
                 }
-                r = net_recv(&m, have[frame % RING] ? 0 : 100);
+                { int blk = !have[frame % RING]; uint64_t tw = now_us(); r = net_recv(&m, blk ? 100 : 0); if (blk) g_netwait += now_us() - tw; }
                 if (r < 0) { if (!g_running) goto out; peer_gone = 1; continue; }
                 if (r == 0) {
                     if (have[frame % RING]) break;
@@ -5941,6 +5968,8 @@ static int session_loop4(int role, int D, uint32_t maxframes)
                     rem[m.frame % RING] = m.input;
                     have[m.frame % RING] = 1;
                     if (m.v1 != NO_FRAME) { rem_f[m.v1 % RING] = m.v1; rem_c[m.v1 % RING] = m.v2; COMPARE4(m.v1); }
+                } else if (m.type == M_INPUT2) {
+                    rem2[m.frame % RING] = m.input;
                 } else if (m.type == M_RESET) {
                     rst_add(rst, m.frame);
                 } else if (m.type == M_STATE) {                     /* v1.9.4: el host manda un estado guardado */
@@ -5957,11 +5986,12 @@ static int session_loop4(int role, int D, uint32_t maxframes)
             }
             have[frame % RING] = 0;
             {
-                uint16_t mine = loc[frame % RING], theirs = rem[frame % RING];
-                uint16_t hb = (role == 0) ? mine : theirs;      /* bytes del host */
-                uint16_t cb = (role == 0) ? theirs : mine;      /* bytes del que se une */
-                p1 = hb & 0xFF; p2 = (uint16_t)(hb >> 8);
-                p3 = cb & 0xFF; p4 = (uint16_t)(cb >> 8);
+                uint16_t mA = loc[frame % RING], mB = loc2[frame % RING], tA = rem[frame % RING], tB = rem2[frame % RING];
+                uint16_t hA = role == 0 ? mA : tA, hB = role == 0 ? mB : tB;      /* mandos del host */
+                uint16_t cA = role == 0 ? tA : mA, cB = role == 0 ? tB : mB;      /* mandos del que se une */
+                if (g_mode4 == 1)      { p1 = hA; p2 = hB; p3 = cA; p4 = 0; }     /* 2 vs 1 */
+                else if (g_mode4 == 2) { p1 = hA; p2 = cA; p3 = cB; p4 = 0; }     /* 1 vs 2 */
+                else                   { p1 = hA; p2 = hB; p3 = cA; p4 = cB; }   /* 2 vs 2 */
             }
         }
 
@@ -5986,6 +6016,7 @@ static int session_loop4(int role, int D, uint32_t maxframes)
           if (b && role == 1 && frame >= (uint32_t)atoi(b) && frame < (uint32_t)atoi(b) + 30) p3 ^= 0xFF; }
 #endif
         g_vid_fresh = 0;
+        skip_now = role != -2 ? skip_decide() : 0;
         step_frame4(p1, p2, p3, p4);
         if (g_shot_req && g_vid_fresh) { g_shot_req = 0; shot_do(); }   /* v1.9.6: captura limpia */
 
@@ -5994,6 +6025,9 @@ static int session_loop4(int role, int D, uint32_t maxframes)
         if (role >= 0) COMPARE4(frame);
         g_run_hash = fnv_u32(g_run_hash, g_frame_crc);
 
+        if (skip_now) skip_wait();
+        else {
+        g_skip_run = 0;
         if (role >= 0 && netinfo_show(frame)) {
             if (g_desyncs) snprintf(ov, sizeof ov, "DESYNC EN FRAME %u", (unsigned)g_first_desync);
             else if (g_netinfo == 1) snprintf(ov, sizeof ov, "4J %s DELAY %d (%dMS) FPS %u TRABAS %u", role == 0 ? "P1+P2" : "P3+P4", D, D * 17, (unsigned)g_ni_fps, (unsigned)g_ni_st);
@@ -6003,11 +6037,13 @@ static int session_loop4(int role, int D, uint32_t maxframes)
         if (g_toast_n > 0) { ui_text(4, 224, g_toast, 1, 0xFFFFFF40); g_toast_n--; }      /* v1.9.2: avisos tambien en el modo de 4 */
         if (g_showfps && role != -2) ui_fps();                           /* v1.9.2: FPS en pantalla */
         present();
+        }
         if ((role >= 0 && g_netinfo == 1) || (g_showfps && role != -2)) netinfo_tick();
         frame++;
         g_frames_done = frame;
     }
 out:
+    core_skip_draw(0); g_fs_prev = 0; g_debt = 0; g_skip_run = 0;
     g_ingame = 0;                           /* v1.9.3: al salir de la partida, los menus vuelven a MENU_SCREEN */
     g_need_crc = 1;
     g_ka_on = 0;
@@ -7238,8 +7274,8 @@ static void ui_options(void)
 
 static int ui_menu(void)
 {
-    static const char *items[3] = { "ELEGIR JUEGO", "JUGAR (1 A 4 MANDOS)", "OPCIONES" };
-    static const int modes[3] = { MODE_ROM, MODE_SOLO, MODE_OPT };   /* v0.1: solo local; el online llega en la v0.2 */
+    static const char *items[4] = { "ELEGIR JUEGO", "JUGAR LOCAL (1 A 4 MANDOS)", "JUGAR ONLINE", "OPCIONES" };
+    static const int modes[4] = { MODE_ROM, MODE_SOLO, MODE_ONLINE, MODE_OPT };
     int i;
     g_stage = "menu";
     ui_prime();
@@ -7248,8 +7284,8 @@ static int ui_menu(void)
         char l[80], nm[48];
         pump();
         e = ui_edges();
-        if (e & UI_UP)   g_menu_sel = (g_menu_sel + 2) % 3;
-        if (e & UI_DOWN) g_menu_sel = (g_menu_sel + 1) % 3;
+        if (e & UI_UP)   g_menu_sel = (g_menu_sel + 3) % 4;
+        if (e & UI_DOWN) g_menu_sel = (g_menu_sel + 1) % 4;
         if (e & UI_CANCEL) {
             /* v1.9.4: O en el menu principal sale al XMB, sin confirmar (igual que la salida del sistema: g_running = 0) */
             logf_("salida al XMB pedida con O en el menu principal");
@@ -7264,15 +7300,15 @@ static int ui_menu(void)
         if (hr_usable()) {
             static const HHint hh[2] = { { "X", "ELEGIR", HC_BX }, { "O", "SALIR AL XMB", HC_BO } };
             unsigned dis = 0;
-            for (i = 0; i < 3; i++) if (!g_rom && modes[i] != MODE_ROM && modes[i] != MODE_OPT) dis |= 1u << i;
-            hr_head("ARCADE PARA PS3  -  SOLO LOCAL (V0.1)");
-            hr_panel(70, 210, 790, 652);
+            for (i = 0; i < 4; i++) if (!g_rom && modes[i] != MODE_ROM && modes[i] != MODE_OPT) dis |= 1u << i;
+            hr_head("ARCADE PARA PS3  -  LOCAL Y ONLINE (V0.2)");
+            hr_panel(70, 210, 790, 710);
             if (g_rom) {
                 fit_name(nm, sizeof nm, g_rom_name, 34);
                 snprintf(l, sizeof l, "JUEGO: %s", nm);
                 hr_text(96, 252, l, FS_M, HC_GREEN, 2);
             } else hr_text(96, 252, "JUEGO: NINGUNO (ELIGE UNO)", FS_M, HC_AMBER, 2);
-            hr_rows(96, 280, 668, items, 3, g_menu_sel, dis, 58);
+            hr_rows(96, 280, 668, items, 4, g_menu_sel, dis, 58);
             hr_panel(830, 210, 1210, 440);
             hr_text(856, 252, "EN PARTIDA", FS_M, HC_YEL, 2);
             hr_text(856, 302, "R3", FS_M, HC_WHITE, 2);  hr_text(930, 302, "menú", FS_S, HC_DIM, 2);
@@ -7287,7 +7323,7 @@ static int ui_menu(void)
         }
         ui_clear();
         ui_center(20, "ARCADE STATION V0.1", 2, 0xFFFFD040);
-        ui_center(46, "ARCADE PARA PS3 - SOLO LOCAL (V0.1)", 1, 0xFFC0C0FF);
+        ui_center(46, "ARCADE PARA PS3 - LOCAL Y ONLINE (V0.2)", 1, 0xFFC0C0FF);
         if (g_rom) {
             fit_name(nm, sizeof nm, g_rom_name, 34);
             snprintf(l, sizeof l, "JUEGO: %s", nm);
@@ -7295,16 +7331,68 @@ static int ui_menu(void)
         } else {
             ui_center(66, "JUEGO: NINGUNO (ELIGE UNO)", 1, 0xFFFFC040);
         }
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < 4; i++) {
             char line[40];
             uint32_t col = i == g_menu_sel ? 0xFFFFFFFF : 0xFF8080A0;
             if (!g_rom && modes[i] != MODE_ROM && modes[i] != MODE_OPT) col = i == g_menu_sel ? 0xFFA0A0B0 : 0xFF505068;   /* bloqueadas sin ROM */
             snprintf(line, sizeof line, "%s %s", i == g_menu_sel ? ">" : " ", items[i]);
-            ui_center(90 + i * 17, line, 1, col);
+            ui_center(84 + i * 17, line, 1, col);
         }
         ui_center(196, "ARRIBA/ABAJO + X", 1, 0xFF8080A0);
         ui_center(209, "EN PARTIDA: R3 = MENU   L2 = CAPTURA", 1, 0xFF8080A0);
         ui_center(222, "O: SALIR AL XMB", 1, 0xFF8080A0);
+        present();
+#ifdef NESNET_HOST
+        sleep_ms(16);
+#endif
+    }
+    return -1;
+}
+
+/* Arcade Station: submenu JUGAR ONLINE. Devuelve 1 = CREAR 1vs1, 2 = UNIRSE 1vs1, 3 = CREAR multijugador (g_mode4 ya puesto),
+ * 4 = UNIRSE multijugador (el modo lo manda el host), -1 = volver. */
+static int ui_menu_online(void)
+{
+    static const char *items[7] = { "1 VS 1  -  CREAR SALA", "1 VS 1  -  UNIRSE A SALA", "2 VS 2  -  CREAR (TU: 2 MANDOS)",
+                                    "2 VS 1  -  CREAR (TU: 2, AMIGO: 1)", "1 VS 2  -  CREAR (TU: 1, AMIGO: 2)",
+                                    "MULTIJUGADOR  -  UNIRSE A SALA", "VOLVER" };
+    int sel = 0, i;
+    g_stage = "menu-online";
+    ui_prime();
+    while (g_running) {
+        uint16_t e;
+        pump();
+        e = ui_edges();
+        if (e & UI_UP)   sel = (sel + 6) % 7;
+        if (e & UI_DOWN) sel = (sel + 1) % 7;
+        if (e & UI_CANCEL) return -1;
+        if (e & (UI_OK | UI_START)) {
+            switch (sel) {
+            case 0: return 1;
+            case 1: return 2;
+            case 2: g_mode4 = 0; return 3;
+            case 3: g_mode4 = 1; return 3;
+            case 4: g_mode4 = 2; return 3;
+            case 5: return 4;
+            default: return -1;
+            }
+        }
+        if (hr_usable()) {
+            static const HHint hh[2] = { { "X", "ELEGIR", HC_BX }, { "O", "VOLVER", HC_BO } };
+            hr_head("JUGAR ONLINE");
+            hr_panel(70, 190, 900, 700);
+            hr_rows(96, 214, 780, items, 7, sel, 0, 58);
+            hr_hints(hh, 2);
+            present();
+#ifdef NESNET_HOST
+            sleep_ms(16);
+#endif
+            continue;
+        }
+        ui_clear();
+        ui_center(14, "JUGAR ONLINE", 2, 0xFFFFD040);
+        for (i = 0; i < 7; i++) ui_center(44 + i * 20, items[i], 1, i == sel ? 0xFFFFFFFF : 0xFF8080A0);
+        ui_center(200, "ARRIBA/ABAJO + X    O: VOLVER", 1, 0xFF8080A0);
         present();
 #ifdef NESNET_HOST
         sleep_ms(16);
@@ -7604,7 +7692,7 @@ static int run_online4(int is_host, int D)
     int ok;
     g_four = 1;
     for (;;) {
-        if (!core_load4()) { g_four = 0; net_close(); return 0; }
+        if (!core_load()) { g_four = 0; net_close(); return 0; }
         ok = session_loop4(is_host ? 0 : 1, D, g_maxframes);
         core_unload();
         if (!g_sw_pending) break;
@@ -7827,7 +7915,14 @@ static int app_main(const char *argv0)
             continue;
         }
         if (!g_rom) { choice = -1; continue; }             /* seguridad: sin ROM no se arranca nada */
-        if (choice == MODE_FOUR) {
+        if (choice == MODE_ONLINE) {
+            int sub = ui_menu_online();
+            if (sub < 0) { choice = -1; continue; }
+            logf_("modo elegido: ONLINE %s", sub == 1 ? "1VS1 CREAR" : sub == 2 ? "1VS1 UNIRSE" : sub == 3 ? (g_mode4 == 0 ? "2VS2 CREAR" : g_mode4 == 1 ? "2VS1 CREAR" : "1VS2 CREAR") : "MULTIJUGADOR UNIRSE");
+            g_err = "";
+            ok = sub == 1 ? run_host() : sub == 2 ? run_client() : sub == 3 ? run_host4() : run_client4();
+            choice = -1;
+        } else if (choice == MODE_FOUR) {
             /* v1.8: modo de 4 jugadores: submenu aparte con host y unirse (copias del 1vs1, otro protocolo) */
             int sub = ui_menu4();
             if (sub < 0) { choice = -1; continue; }         /* VOLVER / O: regresa al menu principal */
@@ -7924,7 +8019,7 @@ int main(int argc, char **argv)
         int i;
         ui_clear();
         ui_center(20, "ARCADE STATION V0.1", 2, 0xFFFFD040);
-        ui_center(46, "ARCADE PARA PS3 - SOLO LOCAL (V0.1)", 1, 0xFFC0C0FF);
+        ui_center(46, "ARCADE PARA PS3 - LOCAL Y ONLINE (V0.2)", 1, 0xFFC0C0FF);
         for (i = 0; i < 3; i++) {
             char line[40];
             snprintf(line, sizeof line, "%s %s", i == 0 ? ">" : " ", items[i]);
@@ -7954,6 +8049,7 @@ int main(int argc, char **argv)
     frames = (uint32_t)atoi(argv[3]);
     if (argc > 4) port = atoi(argv[4]);
     g_maxframes = frames;
+    if (getenv("NESNET_MODE4")) g_mode4 = atoi(getenv("NESNET_MODE4"));          /* prueba: modo multijugador del host / de la referencia */
     if (getenv("NESNET_UI")) { g_ui_script = getenv("NESNET_UI"); g_ui_has_script = 1; }   /* pruebas del menu de salir */
     if (getenv("NESNET_R2")) g_exit_at = (uint32_t)atoi(getenv("NESNET_R2"));
     if (getenv("NESNET_R2B")) g_exit_at2 = (uint32_t)atoi(getenv("NESNET_R2B"));
