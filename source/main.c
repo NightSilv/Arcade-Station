@@ -6476,15 +6476,22 @@ static uint32_t g_maxframes;              /* 0 = sin limite (solo la version de 
 static int      g_desyncs;
 static uint32_t g_first_desync;
 
+/* v1.9.10: al cerrar el menu R3 los botones que seguian apretados (por ejemplo la X de "SI, cargar") NO llegan al juego hasta que se
+ * suelten: antes el juego los veia apretados en el primer cuadro (en la seleccion de personaje se elegia solo). Las flechas no se
+ * bloquean. Solo toca lo que se le manda al juego; el menu y el protocolo online no cambian. */
+static uint16_t g_swallow[4];
 static uint16_t local_bits(int port, int slot, uint32_t frame)
 {
+    uint16_t b;
 #ifdef NESNET_HOST
     (void)port;
-    return script_input(slot, frame);
+    b = script_input(slot, frame);
 #else
     (void)slot; (void)frame;
-    return pad_nes_bits(port);
+    b = pad_nes_bits(port);
 #endif
+    g_swallow[slot & 3] &= b;                      /* lo que ya se solto deja de estar bloqueado */
+    return (uint16_t)(b & ~g_swallow[slot & 3]);
 }
 
 /* v1.7: mini menu de salida (se abre con R2). Devuelve 1 si confirma salir (X), 0 si sigue jugando (O).
@@ -6720,6 +6727,7 @@ static int solo_menu(int online, int host)
         sleep_ms(16);
 #endif
     }
+    { int q; for (q = 0; q < 4; q++) g_swallow[q] = (uint16_t)(0xFFFFu & ~(NB_UP | NB_DOWN | NB_LEFT | NB_RIGHT)); }   /* v1.9.10: botones apretados al cerrar el menu no pasan al juego */
     g_bd_panel = 1; g_bd_dirty = 1;
     memcpy(g_fb, g_fb_save, sizeof g_fb);
     g_stage = "juego";
@@ -7242,13 +7250,16 @@ out:
 static uint16_t local_pad4(int role, int slot, uint32_t frame)
 {
     int n = role == 0 ? (g_mode4 == 2 ? 1 : 2) : (g_mode4 == 1 ? 1 : 2);
+    uint16_t b;
     if (slot >= n) return 0;
 #ifdef NESNET_HOST
-    return script_input((role == 1 ? 2 : 0) + slot, frame);   /* pruebas: host = jugadores 0 y 1, cliente = jugadores 2 y 3 */
+    b = script_input((role == 1 ? 2 : 0) + slot, frame);   /* pruebas: host = jugadores 0 y 1, cliente = jugadores 2 y 3 */
 #else
     (void)frame;
-    return pad_nes_bits(slot);
+    b = pad_nes_bits(slot);
 #endif
+    g_swallow[slot & 3] &= b;                      /* v1.9.10: botones apretados al cerrar el menu R3 no pasan al juego hasta soltarlos */
+    return (uint16_t)(b & ~g_swallow[slot & 3]);
 }
 
 /* role: 0 = host (P1+P2), 1 = el que se une (P3+P4), -2 = referencia de pruebas: 4 jugadores locales con retraso D */
