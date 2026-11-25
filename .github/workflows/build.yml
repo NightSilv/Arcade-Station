@@ -128,18 +128,13 @@ jobs:
             perl -0pi -e 's/^   BurnDrvInit\(\);$/   { int rc_init = BurnDrvInit(); log_cb(RETRO_LOG_INFO, "[FBA] BurnDrvInit devolvio %d\\n", rc_init); }/m' src/burner/libretro/libretro.cpp
           fi
           grep -q "rc_init = BurnDrvInit" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de BurnDrvInit"; exit 1; }
-          # 6) retro_deinit libera g_fba_frame pero no lo pone a NULL: un segundo retro_deinit lo liberaria dos veces
-          if ! grep -q "g_fba_frame = NULL" src/burner/libretro/libretro.cpp; then
-            perl -0pi -e 's/free\(g_fba_frame\);/{ free(g_fba_frame); g_fba_frame = NULL; }/' src/burner/libretro/libretro.cpp
+          # 6) CARGAR ESTADO en juegos CPS1 (sf2ce, etc.): el nucleo restaura el numero de banco del Z80 de sonido pero NO vuelve a mapear
+          #    la ventana 0x8000-0xBFFF, asi que el Z80 sigue leyendo el banco de ANTES de cargar (suenan sonidos de otros niveles / golpes que no van).
+          #    Se vuelve a mapear el banco justo despues de restaurarlo.
+          if ! grep -q "parche ArcadeStation banco" src/burn/drv/capcom/ps_z.cpp; then
+            perl -0pi -e 's/(\tSCAN_VAR\(nPsndZBank\);\n)/$1\t\/* parche ArcadeStation banco *\/ if (nAction & ACB_WRITE) { ZetOpen(0); PsndZBankMap(); ZetClose(); }\n/' src/burn/drv/capcom/ps_z.cpp
           fi
-          grep -q "g_fba_frame = NULL" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de g_fba_frame"; exit 1; }
-          # 7) salto de dibujo: fba_skip_draw(1) hace que retro_run no dibuje (pBurnDraw = NULL) y avise "cuadro repetido" (video_cb con NULL)
-          if ! grep -q "fba_skip_draw" src/burner/libretro/libretro.cpp; then
-            perl -0pi -e 's/void retro_run\(\)\n\{/static int g_skipdraw;\nextern "C" void fba_skip_draw(int s) { g_skipdraw = s; }\n\nvoid retro_run()\n{/' src/burner/libretro/libretro.cpp
-            perl -0pi -e 's/pBurnDraw = \(uint8_t\*\)g_fba_frame;\n\n   InputMake\(\);/pBurnDraw = g_skipdraw ? NULL : (uint8_t*)g_fba_frame;\n\n   InputMake();/' src/burner/libretro/libretro.cpp
-            perl -0pi -e 's/video_cb\(g_fba_frame, width, height, nBurnPitch\);/video_cb(g_skipdraw ? NULL : g_fba_frame, width, height, nBurnPitch);/' src/burner/libretro/libretro.cpp
-          fi
-          grep -q "fba_skip_draw" src/burner/libretro/libretro.cpp && grep -q "g_skipdraw ? NULL : (uint8_t" src/burner/libretro/libretro.cpp && grep -q "video_cb(g_skipdraw" src/burner/libretro/libretro.cpp || { echo "::error::No se pudo aplicar el parche de salto de dibujo"; exit 1; }
+          grep -q "parche ArcadeStation banco" src/burn/drv/capcom/ps_z.cpp || { echo "::error::No se pudo aplicar el parche del banco Z80"; exit 1; }
 
       - name: Compilar nucleo FB Alpha 2012 (solo arcade) con platform=psl1ght
         run: |
