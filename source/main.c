@@ -8966,8 +8966,13 @@ static int ui_menu(void)
         char l[80], nm[48];
         pump();
         e = ui_edges();
-        if (e & UI_UP)   g_menu_sel = (g_menu_sel + 3) % 4;
-        if (e & UI_DOWN) g_menu_sel = (g_menu_sel + 1) % 4;
+        if (hr_usable()) {                    /* cuadricula 2x2: arriba/abajo cambian de fila, izquierda/derecha de columna */
+            if (e & (UI_UP | UI_DOWN)) g_menu_sel ^= 2;
+            if (e & (UI_LEFT | UI_RIGHT)) g_menu_sel ^= 1;
+        } else {
+            if (e & UI_UP)   g_menu_sel = (g_menu_sel + 3) % 4;
+            if (e & UI_DOWN) g_menu_sel = (g_menu_sel + 1) % 4;
+        }
         if (e & UI_CANCEL) {
             /* v1.9.4: O en el menu principal sale al XMB, sin confirmar (igual que la salida del sistema: g_running = 0) */
             logf_("salida al XMB pedida con O en el menu principal");
