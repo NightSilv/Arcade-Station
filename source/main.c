@@ -4077,18 +4077,19 @@ static uint16_t stick_nes_bits(unsigned h, unsigned v)
 enum { PB_CROSS, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_L2, PB_R2, PB_L3, PB_R3, PB_START, PB_SELECT, PB_COUNT };
 #define PB_NONE   (-1)
 #define PB_BIT(b) (1u << (b))
-enum { MA_A, MA_B, MA_SEL, MA_START, MA_TA, MA_TB, MA_COUNT };    /* MA_TA / MA_TB = turbo A / turbo B */
+/* v1.9.10: 8 botones de arcade + moneda + start, para los 4 mandos (sin turbo). Cada accion dispara un bit del mando del nucleo. */
+enum { MA_B1, MA_B2, MA_B3, MA_B4, MA_B5, MA_B6, MA_B7, MA_B8, MA_COIN, MA_START, MA_COUNT };
+#define NPADS 4
 
 static const char *const pb_names[PB_COUNT] = { "X", "O", "CUADRADO", "TRIANGULO", "L1", "R1", "L2", "R2", "L3", "R3", "START", "SELECT" };
-static const char *const ma_names[MA_COUNT] = { "A", "B", "SELECT", "START", "TURBO A", "TURBO B" };
+static const char *const ma_names[MA_COUNT] = { "BOTÓN 1", "BOTÓN 2", "BOTÓN 3", "BOTÓN 4", "BOTÓN 5", "BOTÓN 6", "BOTÓN 7", "BOTÓN 8", "MONEDA", "START" };
+static const uint16_t ma_bit[MA_COUNT] = { NB_A, NB_B, NB_Y, NB_X, NB_L, NB_R, NB_R2, NB_L2, NB_SEL, NB_START };
 
-/* boton de la PS3 que dispara cada boton del NES, por mando. Los valores por defecto son EXACTAMENTE los de la v1.8.1
- * (O = A, X = B, SELECT, START); los turbo empiezan sin asignar. Las direcciones (cruz y palanca) no se remapean. */
-static int g_map[2][MA_COUNT] = {
-    { PB_CIRCLE, PB_CROSS, PB_SELECT, PB_START, PB_NONE, PB_NONE },
-    { PB_CIRCLE, PB_CROSS, PB_SELECT, PB_START, PB_NONE, PB_NONE }
-};
-static unsigned g_turbo_cnt[2][2];     /* cuadros seguidos que lleva apretado cada turbo (A, B) de cada mando */
+/* boton de la PS3 que dispara cada accion, por mando (1 a 4). Los valores por defecto son EXACTAMENTE los de antes de este menu:
+ * O=1, X=2, CUADRADO=3, TRIANGULO=4, L1=5, R1=6, R2=7, L2=8 (solo mandos 2 a 4: en el 1 es la captura), SELECT=moneda, START.
+ * Las direcciones (cruz y palanca) no se remapean. */
+#define MAP_DEF(l2) { PB_CIRCLE, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, l2, PB_SELECT, PB_START }
+static int g_map[NPADS][MA_COUNT] = { MAP_DEF(PB_NONE), MAP_DEF(PB_L2), MAP_DEF(PB_L2), MAP_DEF(PB_L2) };
 static int      g_screen;              /* 0 = original (pixeles cuadrados, como hasta ahora), 1 = 4:3 real, 2 = 16:9 estirada */
 /* v1.9.3: la opcion de pantalla (g_screen) es solo para la imagen del JUEGO. Los menus y avisos (todo lo que se dibuja fuera de una
  * partida) usan siempre MENU_SCREEN, asi no cambian de tamano al mover ORIGINAL / 4:3 / 16:9. El ajuste de imagen (tamano y
@@ -4111,45 +4112,32 @@ static int      g_img_dx, g_img_dy;
 
 static void map_defaults(int p)
 {
-    g_map[p][MA_A] = PB_CIRCLE; g_map[p][MA_B] = PB_CROSS;
-    g_map[p][MA_SEL] = PB_SELECT; g_map[p][MA_START] = PB_START;
-    g_map[p][MA_TA] = PB_NONE; g_map[p][MA_TB] = PB_NONE;
-    g_turbo_cnt[p][0] = g_turbo_cnt[p][1] = 0;
+    static const int d[MA_COUNT] = { PB_CIRCLE, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, PB_L2, PB_SELECT, PB_START };
+    int a;
+    for (a = 0; a < MA_COUNT; a++) g_map[p][a] = d[a];
+    if (p == 0) g_map[p][MA_B8] = PB_NONE;               /* L2 del mando 1 = captura */
 }
 
-/* Convierte los botones de PS3 apretados (mascara PB_BIT) y las direcciones ya calculadas (cruz + palanca) en el byte NES.
- * Turbo: mientras el boton esta apretado alterna 2 cuadros apretado / 2 sueltos (15 pulsos por segundo), empezando apretado. */
+/* Convierte los botones de PS3 apretados (mascara PB_BIT) y las direcciones ya calculadas (cruz + palanca) en los bits del mando del nucleo. */
 static uint16_t map_nes_bits(int port, uint32_t btns, uint16_t dirs)
 {
-    const int *m = g_map[port & 1];
+    const int *m = g_map[port & 3];
     uint16_t b = (uint16_t)(dirs & (NB_UP | NB_DOWN | NB_LEFT | NB_RIGHT));
-    int t;
-    if (m[MA_A]     >= 0 && (btns & PB_BIT(m[MA_A])))     b |= NB_A;
-    if (m[MA_B]     >= 0 && (btns & PB_BIT(m[MA_B])))     b |= NB_B;
-    if (m[MA_SEL]   >= 0 && (btns & PB_BIT(m[MA_SEL])))   b |= NB_SEL;
-    if (m[MA_START] >= 0 && (btns & PB_BIT(m[MA_START]))) b |= NB_START;
-    for (t = 0; t < 2; t++) {
-        int id = m[MA_TA + t];
-        unsigned *c = &g_turbo_cnt[port & 1][t];
-        if (id >= 0 && (btns & PB_BIT(id))) {
-            if (((*c >> 1) & 1u) == 0) b |= (t == 0 ? NB_A : NB_B);
-            *c = (*c + 1) & 0xFFFFu;
-        } else {
-            *c = 0;
-        }
-    }
+    int a;
+    for (a = 0; a < MA_COUNT; a++)
+        if (m[a] >= 0 && (btns & PB_BIT(m[a]))) b |= ma_bit[a];
     if ((b & NB_UP) && (b & NB_DOWN))    b &= (uint16_t)~NB_DOWN;
     if ((b & NB_LEFT) && (b & NB_RIGHT)) b &= (uint16_t)~NB_RIGHT;
     return b;
 }
 
-/* ¿Puede la accion 'act' del mando 'port' tomar el boton 'btn'? Reglas: solo los turbo pueden quedar sin boton;
+/* ¿Puede la accion 'act' del mando 'port' tomar el boton 'btn'? Reglas: solo los botones 7 y 8 pueden quedar sin boton;
  * R3 y L2 del mando 1 estan reservados (R3 abre el menu, L2 hace la captura); un boton que ya usa OTRA fila del mismo mando no se puede tomar
  * (nunca se mueve un boton ajeno: para cambiarlo, primero se libera en su fila). */
 static int map_allowed(int port, int act, int btn)
 {
     int a;
-    if (btn == PB_NONE) return act >= MA_TA;
+    if (btn == PB_NONE) return act == MA_B7 || act == MA_B8;
     if (btn < 0 || btn >= PB_COUNT) return 0;
     if (port == 0 && (btn == PB_R3 || btn == PB_L2)) return 0;
     for (a = 0; a < MA_COUNT; a++)
@@ -4160,7 +4148,7 @@ static int map_allowed(int port, int act, int btn)
 static void map_assign(int port, int act, int btn) { g_map[port][act] = btn; }
 
 /* Pasa al siguiente (dir = +1) o anterior (dir = -1) boton permitido, saltando los que no se pueden tomar.
- * Orden: SIN ASIGNAR (solo turbo), X, O, CUADRADO, TRIANGULO, L1, R1, L2, R2, L3, R3, START, SELECT */
+ * Orden: SIN ASIGNAR (solo botones 7 y 8), X, O, CUADRADO, TRIANGULO, L1, R1, L2, R2, L3, R3, START, SELECT */
 static void map_cycle(int port, int act, int dir)
 {
     int n = PB_COUNT + 1, cur = g_map[port][act] + 1, i;
@@ -4171,12 +4159,12 @@ static void map_cycle(int port, int act, int dir)
     }
 }
 
-/* Comprueba un mapeo leido de archivo: botones normales siempre asignados, sin repetidos, sin R3 en el mando 1 */
+/* Comprueba un mapeo leido de archivo: botones 1 a 6, moneda y start siempre asignados, sin repetidos, sin R3 ni L2 en el mando 1 */
 static int map_valid(const int *m, int port)
 {
     int a, c;
     for (a = 0; a < MA_COUNT; a++) {
-        if (m[a] == PB_NONE) { if (a < MA_TA) return 0; continue; }
+        if (m[a] == PB_NONE) { if (a != MA_B7 && a != MA_B8) return 0; continue; }
         if (m[a] < 0 || m[a] >= PB_COUNT) return 0;
         if (port == 0 && (m[a] == PB_R3 || m[a] == PB_L2)) return 0;
         for (c = a + 1; c < MA_COUNT; c++) if (m[c] == m[a]) return 0;
@@ -4315,7 +4303,7 @@ static void canvas_blit_adj(uint32_t *base, int dw, int dh, int mode, int z, con
 /* Guardado de las opciones: USRDIR/opciones.txt (aparte de config.txt, que el instalador puede reemplazar) */
 static void opts_defaults(void)
 {
-    map_defaults(0); map_defaults(1);
+    { int q; for (q = 0; q < NPADS; q++) map_defaults(q); }
     g_screen = 0;
     g_volume = 100;
     g_netinfo = 0;
@@ -4344,8 +4332,12 @@ static void opts_save(void)
     fprintf(f, "imgy=%d\n", g_img_dy);
     if (g_last_rom[0]) fprintf(f, "rom=%s\n", g_last_rom);
     if (g_last_code[0]) fprintf(f, "code=%s\n", g_last_code);
-    for (p = 0; p < 2; p++)
-        fprintf(f, "pad%d=%d,%d,%d,%d,%d,%d\n", p + 1, g_map[p][0], g_map[p][1], g_map[p][2], g_map[p][3], g_map[p][4], g_map[p][5]);
+    for (p = 0; p < NPADS; p++) {
+        int a;
+        fprintf(f, "mando%d=", p + 1);
+        for (a = 0; a < MA_COUNT; a++) fprintf(f, "%s%d", a ? "," : "", g_map[p][a]);
+        fprintf(f, "\n");
+    }
     fclose(f);
     remove(path);
     if (rename(tmp, path) != 0) logf_("AVISO: no pude renombrar opciones.tmp");
@@ -4388,18 +4380,17 @@ static void opts_load(void)
             okc = (n == 10);
             for (k = 0; okc && k < n; k++) if (line[5 + k] < '0' || line[5 + k] > '9') okc = 0;
             if (okc) { memcpy(g_last_code, line + 5, 10); g_last_code[10] = 0; }
-        } else if ((line[0] == 'p' && line[1] == 'a' && line[2] == 'd' && (line[3] == '1' || line[3] == '2') && line[4] == '=') &&
-                   sscanf(line + 5, "%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
-            p = line[3] - '1';
+        } else if (!strncmp(line, "mando", 5) && line[5] >= '1' && line[5] <= '4' && line[6] == '=' &&
+                   sscanf(line + 7, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]) == 10) {
+            p = line[5] - '1';
             if (map_valid(v, p)) { int a; for (a = 0; a < MA_COUNT; a++) g_map[p][a] = v[a]; }
             else logf_("AVISO: opciones.txt: mapeo del mando %d no valido, uso el de por defecto", p + 1);
         }
     }
     fclose(f);
-    logf_("opciones: pantalla=%d volumen=%d info_red=%d fps=%d imagen=%d%%,%d,%d  mando1=%d,%d,%d,%d,%d,%d  mando2=%d,%d,%d,%d,%d,%d", g_screen, g_volume, g_netinfo,
-          g_showfps, g_img_size, g_img_dx, g_img_dy,
-          g_map[0][0], g_map[0][1], g_map[0][2], g_map[0][3], g_map[0][4], g_map[0][5],
-          g_map[1][0], g_map[1][1], g_map[1][2], g_map[1][3], g_map[1][4], g_map[1][5]);
+    logf_("opciones: pantalla=%d volumen=%d info_red=%d fps=%d imagen=%d%%,%d,%d", g_screen, g_volume, g_netinfo, g_showfps, g_img_size, g_img_dx, g_img_dy);
+    { int q; for (q = 0; q < NPADS; q++)
+        logf_("opciones: mando%d=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", q + 1, g_map[q][0], g_map[q][1], g_map[q][2], g_map[q][3], g_map[q][4], g_map[q][5], g_map[q][6], g_map[q][7], g_map[q][8], g_map[q][9]); }
     if (g_last_rom[0]) logf_("opciones: ultima ROM = %s", g_last_rom);
 }
 
@@ -4718,6 +4709,7 @@ static void sysutil_cb(u64 status, u64 param, void *usrdata)
 }
 
 static void pump(void) { sysUtilCheckCallback(); au_pump(); }
+static int pad_connected(int p) { padInfo pi; ioPadGetInfo(&pi); return p >= 0 && p < 4 && pi.status[p] ? 1 : 0; }
 
 static void exit_cb(void)
 {
@@ -4784,14 +4776,7 @@ static uint16_t pad_nes_bits(int port)
     if (d->BTN_RIGHT)  dirs |= NB_RIGHT;
     dirs |= stick_nes_bits(d->ANA_L_H, d->ANA_L_V);       /* v1.8.1: palanca izquierda = cruz */
     {
-        uint16_t b = map_nes_bits(port, pad_buttons(d), dirs);   /* v1.8.2: botones segun OPCIONES > MANDOS (por defecto, igual que antes) */
-        if (d->BTN_SQUARE)   b |= NB_Y;                           /* Arcade Station: botones extra para 3 y 6 botones */
-        if (d->BTN_TRIANGLE) b |= NB_X;
-        if (d->BTN_L1)       b |= NB_L;
-        if (d->BTN_R1)       b |= NB_R;
-        if (d->BTN_R2)       b |= NB_R2;                          /* Arcade Station: 7o y 8o boton de algunos juegos */
-        if (port > 0 && d->BTN_L2) b |= NB_L2;
-        return b;
+        return map_nes_bits(port, pad_buttons(d), dirs);         /* v1.9.10: los 8 botones, moneda y start segun OPCIONES > MANDOS (por defecto, igual que antes) */
     }
 }
 
@@ -4856,6 +4841,7 @@ static void ui_prime(void) { (void)ui_edges(); }
 #else /* ------------------------- version de pruebas (PC) ------------- */
 
 static void pump(void) {}
+static int pad_connected(int p) { return p >= 0 && p < 2; }          /* pruebas: dos mandos */
 static int hr_usable(void) { const char *e = getenv("NESNET_HR"); return !g_adjusting && !(e && e[0] == '0'); }   /* prueba v1.9.7: NESNET_HR=0 = dibujo viejo */
 static void present(void);                 /* definida mas abajo (puede volcar capturas de pantalla) */
 static void net_ensure(void) {}
@@ -8286,6 +8272,14 @@ static void hr_icon(int kind, int cx, int cy, int s, uint32_t col)
 #undef SC
 }
 
+/* linea gruesa hecha con puntos (para iconos y simbolos) */
+static void sm_line(int x0, int y0, int x1, int y1, int rad, uint32_t c, int a)
+{
+    int dx = x1 - x0, dy = y1 - y0, n = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy), i;
+    if (n == 0) { hr_dot(x0, y0, rad, c, a); return; }
+    for (i = 0; i <= n; i++) hr_dot(x0 + dx * i / n, y0 + dy * i / n, rad, c, a);
+}
+
 /* iconos extra del menu R3: 0 = play, 1 = disquete, 2 = flecha abajo (cargar), 3 = cartucho, 4 = flecha circular, 5 = encendido */
 static void sm_tile_icon(int kind, int cx, int cy, int s, uint32_t col)
 {
@@ -8342,6 +8336,26 @@ static void sm_tile_icon(int kind, int cx, int cy, int s, uint32_t col)
                 hr_rect(cx + SC(30) - th / 2 + i / 2, cy - SC(30) - th / 2 - i / 3, cx + SC(30) + th / 2 + 1 + i / 2, cy - SC(30) + th / 2 + 1 - i / 3, c, a / 2 + 12);
                 hr_rect(cx + SC(30) + SC(14) - th / 2, cy - SC(30) - SC(14) + i - th / 2, cx + SC(30) + SC(14) + th / 2 + 1, cy - SC(30) - SC(14) + i + th / 2 + 1, c, a / 2 + 12);
             }
+        } else if (kind == 6) {                /* pantalla (tele con pie) */
+            hr_rect(cx - SC(48) - h, cy - SC(36) - h, cx + SC(48) + h, cy - SC(36) + th + h, c, a); hr_rect(cx - SC(48) - h, cy + SC(26) - th - h, cx + SC(48) + h, cy + SC(26) + h, c, a);
+            hr_rect(cx - SC(48) - h, cy - SC(36) - h, cx - SC(48) + th + h, cy + SC(26) + h, c, a); hr_rect(cx + SC(48) - th - h, cy - SC(36) - h, cx + SC(48) + h, cy + SC(26) + h, c, a);
+            hr_rect(cx - SC(22) - h, cy + SC(40) - h, cx + SC(22) + h, cy + SC(40) + th + h, c, a); hr_rect(cx - th / 2 - h, cy + SC(26) - h, cx + th / 2 + 1 + h, cy + SC(40) + h, c, a);
+        } else if (kind == 7) {                /* mando: cuerpo, cruz y dos botones */
+            hr_rect(cx - SC(50) - h, cy - SC(26) - h, cx + SC(50) + h, cy - SC(26) + th + h, c, a); hr_rect(cx - SC(50) - h, cy + SC(28) - th - h, cx + SC(50) + h, cy + SC(28) + h, c, a);
+            hr_rect(cx - SC(50) - h, cy - SC(26) - h, cx - SC(50) + th + h, cy + SC(28) + h, c, a); hr_rect(cx + SC(50) - th - h, cy - SC(26) - h, cx + SC(50) + h, cy + SC(28) + h, c, a);
+            hr_rect(cx - SC(34) - h, cy - SC(2) - h, cx - SC(10) + h, cy + SC(2) + h + 2, c, a); hr_rect(cx - SC(23) - h, cy - SC(13) - h, cx - SC(19) + h + 2, cy + SC(11) + h, c, a);
+            hr_dot(cx + SC(16), cy - SC(8), SC(6) + h / 2, c, a); hr_dot(cx + SC(32), cy + SC(6), SC(6) + h / 2, c, a);
+        } else if (kind == 8) {                /* altavoz con ondas */
+            hr_rect(cx - SC(46) - h, cy - SC(14) - h, cx - SC(24) + h, cy + SC(14) + h, c, a / 2 + 10);
+            sm_line(cx - SC(24), cy - SC(14), cx - SC(2), cy - SC(36), th / 2 + h, c, a); sm_line(cx - SC(24), cy + SC(14), cx - SC(2), cy + SC(36), th / 2 + h, c, a);
+            hr_rect(cx - SC(2) - th / 2 - h, cy - SC(36) - h, cx - SC(2) + th / 2 + h, cy + SC(36) + h, c, a);
+            sm_line(cx + SC(14), cy - SC(14), cx + SC(14), cy + SC(14), th / 2 + h, c, a); sm_line(cx + SC(32), cy - SC(26), cx + SC(32), cy + SC(26), th / 2 + h, c, a);
+        } else if (kind == 9) {                /* barras de senal */
+            for (i = 0; i < 4; i++) hr_rect(cx - SC(44) + i * SC(24) - h, cy + SC(34) - SC(16 + i * 16) - h, cx - SC(44) + i * SC(24) + SC(14) + h, cy + SC(34) + h, c, a / 2 + 14);
+        } else if (kind == 10) {               /* ajuste de imagen: marco con cruz */
+            hr_rect(cx - SC(48) - h, cy - SC(36) - h, cx + SC(48) + h, cy - SC(36) + th + h, c, a); hr_rect(cx - SC(48) - h, cy + SC(36) - th - h, cx + SC(48) + h, cy + SC(36) + h, c, a);
+            hr_rect(cx - SC(48) - h, cy - SC(36) - h, cx - SC(48) + th + h, cy + SC(36) + h, c, a); hr_rect(cx + SC(48) - th - h, cy - SC(36) - h, cx + SC(48) + h, cy + SC(36) + h, c, a);
+            hr_rect(cx - SC(48) - h, cy - th / 2 - h, cx + SC(48) + h, cy + th / 2 + 1 + h, c, a / 2 + 10); hr_rect(cx - th / 2 - h, cy - SC(36) - h, cx + th / 2 + 1 + h, cy + SC(36) + h, c, a / 2 + 10);
         } else {                               /* encendido: arco abierto arriba + barra */
             int k;
             for (k = 0; k < 54; k++) {
@@ -8365,9 +8379,12 @@ static void sm_draw_tile(int x0, int y0, int x1, int y1, int on, int dim, int ic
     if (on) { x0 -= 8; y0 -= 8; x1 += 8; y1 += 8; }
     hr_nrect(x0, y0, x1, y1, 14, on ? 5 : 3, col, 205);
     tx = (x0 + x1) / 2;
-    if (icon >= 0) {
+    if (icon == -2) {                                   /* cuadro ancho solo con texto */
+        hr_textc(tx, (y0 + y1) / 2 + 12, lab, on ? FS_L : FS_M, col);
+    } else if (icon >= 0 || icon == -3) {               /* -3 = las letras "FPS" en lugar de un icono */
         cy = y0 + (on ? 74 : 70);
-        sm_tile_icon(icon, tx, cy, on ? 235 : 214, col);
+        if (icon >= 0) sm_tile_icon(icon, tx, cy, on ? 235 : 214, col);
+        else hr_textc(tx, cy + 16, "FPS", FS_H, col);
         hr_textc(tx, y1 - (on ? 54 : 48), lab, on ? FS_L : FS_M, col);
         if (sub) hr_textc(tx, y1 - 18, sub, FS_S, HC_DIM);
     } else {
@@ -8376,6 +8393,36 @@ static void sm_draw_tile(int x0, int y0, int x1, int y1, int on, int dim, int ic
         hr_textc(tx, y0 + (y1 - y0) / 2 + 6, nb, FS_X, col);
         if (lab) hr_textc(tx, y1 - 22, lab, FS_S, dim ? HC_MUTE : on ? HC_WHITE : HC_DIM);
     }
+}
+
+static const char *const ps_names[PB_COUNT] = { "X", "O", "", "", "L1", "R1", "L2", "R2", "L3", "R3", "START", "SELECT" };
+static int hr_psbtn_w(int btn)                        /* ancho que ocupa el simbolo (sin dibujar) */
+{
+    int tw;
+    if (btn < 0 || btn >= PB_COUNT) return hr_tw("NO", FS_S) > 20 ? hr_tw("NO", FS_S) + 24 : 34;
+    if (btn <= PB_TRIANGLE) return 34;
+    tw = hr_tw(ps_names[btn], FS_S);
+    return tw > 20 ? tw + 24 : 34;
+}
+
+/* simbolo de un boton de la PS3 (34 px de alto, y = arriba): X azul, O roja, cuadrado rosa y triangulo verde dibujados;
+ * L1 R1 L2 R2 L3 R3 START SELECT con su texto; sin asignar = "NO". Devuelve el ancho. */
+static int hr_psbtn(int x, int y, int btn)
+{
+    const char *const *nm = ps_names;
+    int cx = x + 17, cy = y + 17;
+    if (btn == PB_CROSS || btn == PB_CIRCLE || btn == PB_SQUARE || btn == PB_TRIANGLE) {
+        uint32_t col = btn == PB_CROSS ? HC_BX : btn == PB_CIRCLE ? HC_BO : btn == PB_SQUARE ? 0xFFC8559Fu : 0xFF2EA66Au;
+        hr_disc(cx, cy, 17, HC_WHITE);
+        hr_disc(cx, cy, 15, col);
+        if (btn == PB_CROSS) { sm_line(cx - 6, cy - 6, cx + 6, cy + 6, 2, HC_WHITE, 256); sm_line(cx + 6, cy - 6, cx - 6, cy + 6, 2, HC_WHITE, 256); }
+        else if (btn == PB_CIRCLE) hr_ellipse(cx, cy, 7, 7, 4, HC_WHITE, 256);
+        else if (btn == PB_SQUARE) hr_rframe(cx - 7, cy - 7, cx + 8, cy + 8, 0, 3, HC_WHITE, 256);
+        else { sm_line(cx, cy - 8, cx - 8, cy + 6, 1, HC_WHITE, 256); sm_line(cx, cy - 8, cx + 8, cy + 6, 1, HC_WHITE, 256); sm_line(cx - 8, cy + 6, cx + 8, cy + 6, 1, HC_WHITE, 256); }
+        return 34;
+    }
+    if (btn < 0 || btn >= PB_COUNT) return hr_badge(x, y, "NO", HC_MUTE);
+    return hr_badge(x, y, nm[btn], HC_BG);
 }
 
 /* ---- v1.9.8: cuadro de caratula en ELEGIR ROM (carpeta USRDIR/covers, mismo nombre que la ROM, .png) ---- */
@@ -11495,11 +11542,11 @@ static void ui_opt_screen(void)
     logf_("opciones: pantalla = %s", screen_names[g_screen]);
 }
 
-/* v1.8.2: OPCIONES > MANDOS > MANDO n: un boton de la PS3 por cada boton del NES, y turbo A / turbo B.
- * IZQ/DER cambia el boton de la fila marcada y SALTA los que ya usa otra fila (no mueve botones ajenos). */
+/* v1.9.10: OPCIONES > MANDOS > MANDO n: un boton de la PS3 (dibujado con su simbolo) por cada boton de arcade (1 a 8), moneda y start. Sin turbo.
+ * IZQ/DER (o X) cambia el boton de la fila marcada y SALTA los que ya usa otra fila (no mueve botones ajenos). START = restaurar este mando. */
 static void ui_opt_pad(int port)
 {
-    int sel = 0, i;          /* filas 0..5 = acciones, 6 = RESTAURAR ESTE MANDO, 7 = VOLVER */
+    int sel = 0, i;          /* filas 0..9 = acciones */
     g_stage = "opciones-mando";
     ui_prime();
     while (g_running) {
@@ -11507,40 +11554,39 @@ static void ui_opt_pad(int port)
         char title[16];
         pump();
         e = ui_edges();
-        if (e & UI_UP)   sel = (sel + 7) % 8;
-        if (e & UI_DOWN) sel = (sel + 1) % 8;
+        if (e & UI_UP)   sel = (sel + MA_COUNT - 1) % MA_COUNT;
+        if (e & UI_DOWN) sel = (sel + 1) % MA_COUNT;
         if (e & UI_CANCEL) break;
-        if (sel < MA_COUNT) {
-            if (e & UI_LEFT)            { map_cycle(port, sel, -1); opts_save(); }
-            if (e & (UI_RIGHT | UI_OK)) { map_cycle(port, sel, +1); opts_save(); }
-        } else if (e & (UI_OK | UI_START)) {
-            if (sel == 6) { map_defaults(port); opts_save(); }
-            else break;
-        }
+        if (e & UI_LEFT)            { map_cycle(port, sel, -1); opts_save(); }
+        if (e & (UI_RIGHT | UI_OK)) { map_cycle(port, sel, +1); opts_save(); }
+        if (e & UI_START)           { map_defaults(port); opts_save(); }
         if (hr_usable()) {
-            static const HHint hh[1] = { { "O", "VOLVER", HC_BO } };
-            char sub[48];
-            snprintf(sub, sizeof sub, "MANDO %d  ·  botones y turbo", port + 1);
+            static const HHint hh[3] = { { "< >", "CAMBIAR", HC_BG }, { "START", "RESTAURAR", HC_BG }, { "O", "VOLVER", HC_BO } };
+            char sub[24];
+            snprintf(sub, sizeof sub, "Mando %d", port + 1);
             hr_head(sub);
-            hr_panel(70, 206, 880, 606);
-            for (i = 0; i < 8; i++) {
-                const char *nm = i < MA_COUNT ? ma_names[i] : (i == 6 ? "RESTAURAR ESTE MANDO" : "VOLVER");
-                const char *vv = i < MA_COUNT ? (g_map[port][i] == PB_NONE ? "NO" : pb_names[g_map[port][i]]) : NULL;
-                hr_row2(86, 222 + i * 46, 780, 46, nm, vv, i == sel, 330);
+            hr_panel(70, 194, 830, 626);
+            for (i = 0; i < MA_COUNT; i++) {
+                int y = 204 + i * 41;
+                if (i == sel) { hr_selbar(84, y, 816, y + 37); hr_text(540, y + 28, "<", FS_M, HC_WHITE, 2); hr_text(762, y + 28, ">", FS_M, HC_WHITE, 2); }
+                hr_text(104, y + 28, ma_names[i], FS_M, i == sel ? HC_WHITE : HC_DIM, 2);
+                hr_psbtn(651 - hr_psbtn_w(g_map[port][i]) / 2, y + 1, g_map[port][i]);
             }
-            hr_panel(910, 206, 1210, 606);
-            hr_text(934, 252, "IZQ/DER", FS_M, HC_YEL, 2);
-            hr_text(934, 290, "cambia el botón", FS_S, HC_DIM, 2);
-            hr_text(934, 322, "(salta los usados)", FS_S, HC_DIM, 2);
-            hr_text(934, 388, "TURBO", FS_M, HC_YEL, 2);
-            hr_text(934, 426, "15 pulsos por", FS_S, HC_DIM, 2);
-            hr_text(934, 458, "segundo", FS_S, HC_DIM, 2);
+            hr_panel(860, 194, 1210, 626);
+            hr_text(884, 244, "IZQ / DER", FS_M, HC_YEL, 2);
+            hr_text(884, 280, "cambia el botón", FS_S, HC_DIM, 2);
+            hr_text(884, 310, "(salta los usados)", FS_S, HC_DIM, 2);
             if (port == 0) {
-                hr_text(934, 524, "MANDO 1", FS_M, HC_AMBER, 2);
-                hr_text(934, 562, "R3 = menú", FS_S, HC_AMBER, 2);
-                hr_text(934, 594, "L2 = captura", FS_S, HC_AMBER, 2);
+                hr_text(884, 380, "MANDO 1", FS_M, HC_AMBER, 2);
+                hr_text(884, 416, "R3 = menú", FS_S, HC_AMBER, 2);
+                hr_text(884, 446, "L2 = captura", FS_S, HC_AMBER, 2);
+            } else {
+                hr_text(884, 380, "L2 está libre", FS_M, HC_WHITE, 2);
+                hr_text(884, 416, "para el botón 8", FS_S, HC_DIM, 2);
             }
-            hr_hints(hh, 1);
+            hr_text(884, 506, "Vale para LOCAL", FS_S, HC_DIM, 2);
+            hr_text(884, 536, "y ONLINE", FS_S, HC_DIM, 2);
+            hr_hints(hh, 3);
             present();
 #ifdef NESNET_HOST
             sleep_ms(16);
@@ -11549,19 +11595,16 @@ static void ui_opt_pad(int port)
         }
         ui_clear();
         snprintf(title, sizeof title, "MANDO %d", port + 1);
-        ui_center(14, title, 2, 0xFFFFD040);
-        for (i = 0; i < 8; i++) {
+        ui_center(8, title, 2, 0xFFFFD040);
+        for (i = 0; i < MA_COUNT; i++) {
             char line[56];
             uint32_t col = i == sel ? 0xFFFFFFFF : 0xFF8080A0;
-            if (i < MA_COUNT)
-                snprintf(line, sizeof line, "%s %-8s %s", i == sel ? ">" : " ", ma_names[i], g_map[port][i] == PB_NONE ? "NO" : pb_names[g_map[port][i]]);
-            else
-                snprintf(line, sizeof line, "%s %s", i == sel ? ">" : " ", i == 6 ? "RESTAURAR ESTE MANDO" : "VOLVER");
-            ui_text(40, 44 + i * 16, line, 1, col);
+            snprintf(line, sizeof line, "%s %-8s %s", i == sel ? ">" : " ", ma_names[i], g_map[port][i] == PB_NONE ? "NO" : pb_names[g_map[port][i]]);
+            ui_text(40, 28 + i * 14, line, 1, col);
         }
         ui_center(176, "IZQ/DER: CAMBIAR (SALTA LOS USADOS)", 1, 0xFFC0C0FF);
-        ui_center(190, "TURBO: 15 PULSOS POR SEGUNDO", 1, 0xFFC0C0FF);
-        if (port == 0) ui_center(204, "MANDO 1: R3 = MENU   L2 = CAPTURA", 1, 0xFFFFC040);
+        if (port == 0) ui_center(190, "MANDO 1: R3 = MENU   L2 = CAPTURA", 1, 0xFFFFC040);
+        ui_center(204, "START: RESTAURAR", 1, 0xFF8080A0);
         ui_center(218, "O: VOLVER", 1, 0xFF8080A0);
         present();
 #ifdef NESNET_HOST
@@ -11570,30 +11613,43 @@ static void ui_opt_pad(int port)
     }
 }
 
+/* v1.9.10: OPCIONES > MANDOS: elegir el mando 1 a 4 (cuadros), RESTAURAR LOS 4 y VOLVER */
 static void ui_opt_pads(void)
 {
-    static const char *items[4] = { "MANDO 1", "MANDO 2", "RESTAURAR LOS DOS", "VOLVER" };
-    int sel = 0, i;
+    int sel = 0, i;          /* 0..3 = mandos, 4 = RESTAURAR LOS 4, 5 = VOLVER */
     g_stage = "opciones-mandos";
     ui_prime();
     while (g_running) {
         uint16_t e;
         pump();
         e = ui_edges();
-        if (e & UI_UP)   sel = (sel + 3) % 4;
-        if (e & UI_DOWN) sel = (sel + 1) % 4;
+        if (hr_usable()) {
+            if (e & (UI_LEFT | UI_RIGHT)) {
+                int d = (e & UI_RIGHT) ? 1 : -1;
+                if (sel < 4) sel = (sel + d + 4) % 4; else sel = sel == 4 ? 5 : 4;
+            }
+            if (e & (UI_UP | UI_DOWN)) { if (sel < 2) sel = 4; else if (sel < 4) sel = 5; else sel = sel == 4 ? 0 : 2; }
+        } else {
+            if (e & UI_UP)   sel = (sel + 5) % 6;
+            if (e & UI_DOWN) sel = (sel + 1) % 6;
+        }
         if (e & UI_CANCEL) break;
         if (e & (UI_OK | UI_START)) {
-            if (sel < 2) { ui_opt_pad(sel); ui_prime(); g_stage = "opciones-mandos"; }
-            else if (sel == 2) { map_defaults(0); map_defaults(1); opts_save(); }
+            if (sel < 4) { ui_opt_pad(sel); ui_prime(); g_stage = "opciones-mandos"; }
+            else if (sel == 4) { for (i = 0; i < NPADS; i++) map_defaults(i); opts_save(); }
             else break;
         }
         if (hr_usable()) {
             static const HHint hh[2] = { { "X", "ENTRAR", HC_BX }, { "O", "VOLVER", HC_BO } };
-            hr_head("MANDOS  ·  botones y turbo de cada mando");
-            hr_panel(70, 210, 900, 540);
-            hr_rows(96, 232, 778, items, 4, sel, 0, 58);
-            hr_text(96, 512, "Vale para SOLO, 1 vs 1 y 4 jugadores", FS_S, HC_DIM, 2);
+            hr_head("Mandos");
+            hr_text(100, 236, "¿Qué mando quieres configurar?", FS_M, HC_WHITE, 2);
+            for (i = 0; i < 4; i++) {
+                char lb[16];
+                snprintf(lb, sizeof lb, "MANDO %d", i + 1);
+                sm_draw_tile(100 + i * 285, 262, 355 + i * 285, 452, sel == i, 0, 7, lb, pad_connected(i) ? "Conectado" : "Sin conectar", 0);
+            }
+            sm_draw_tile(100, 488, 640, 578, sel == 4, 0, -2, "RESTAURAR LOS 4", NULL, 0);
+            sm_draw_tile(670, 488, 1210, 578, sel == 5, 0, -2, "VOLVER", NULL, 0);
             hr_hints(hh, 2);
             present();
 #ifdef NESNET_HOST
@@ -11603,13 +11659,12 @@ static void ui_opt_pads(void)
         }
         ui_clear();
         ui_center(20, "MANDOS", 2, 0xFFFFD040);
-        ui_center(46, "BOTONES Y TURBO DE CADA MANDO", 1, 0xFFC0C0FF);
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < 6; i++) {
             char line[40];
-            snprintf(line, sizeof line, "%s %s", i == sel ? ">" : " ", items[i]);
-            ui_center(84 + i * 22, line, 1, i == sel ? 0xFFFFFFFF : 0xFF8080A0);
+            if (i < 4) snprintf(line, sizeof line, "%s MANDO %d", i == sel ? ">" : " ", i + 1);
+            else snprintf(line, sizeof line, "%s %s", i == sel ? ">" : " ", i == 4 ? "RESTAURAR LOS 4" : "VOLVER");
+            ui_center(66 + i * 20, line, 1, i == sel ? 0xFFFFFFFF : 0xFF8080A0);
         }
-        ui_center(190, "VALE PARA SOLO, 1 VS 1 Y 4 JUGADORES", 1, 0xFF8080A0);
         ui_center(204, "ARRIBA/ABAJO + X", 1, 0xFF8080A0);
         present();
 #ifdef NESNET_HOST
@@ -11833,8 +11888,10 @@ static void ui_opt_image(void)
 
 static void ui_options(void)
 {
-    enum { N_OPT = 7 };
-    static const char *items[N_OPT] = { "PANTALLA", "MANDOS (BOTONES Y TURBO)", "SONIDO (VOLUMEN)", "INFO DE RED EN PARTIDA", "AJUSTE DE IMAGEN", "", "VOLVER" };
+    enum { N_OPT = 6 };            /* PANTALLA, MANDOS, SONIDO, INFO DE RED, AJUSTE DE IMAGEN, FPS (se prende y apaga en su cuadro) */
+    static const char *const lab[N_OPT] = { "PANTALLA", "MANDOS", "SONIDO", "INFO DE RED", "AJUSTE DE IMAGEN", "FPS EN PANTALLA" };
+    static const char *const sub[N_OPT] = { "Original, 4:3 o 16:9", "Botones de los 4 mandos", "Volumen", "En partida", "Centrar y tamaño", "" };
+    static const int ic[N_OPT] = { 6, 7, 8, 9, 10, -3 };
     int sel = 0, i;
     g_stage = "opciones";
     ui_prime();
@@ -11842,35 +11899,30 @@ static void ui_options(void)
         uint16_t e;
         pump();
         e = ui_edges();
-        if (e & UI_UP)   sel = (sel + N_OPT - 1) % N_OPT;
-        if (e & UI_DOWN) sel = (sel + 1) % N_OPT;
+        if (hr_usable()) {         /* cuadros 3 x 2: izquierda/derecha dentro de la fila, arriba/abajo entre filas */
+            if (e & UI_LEFT)  sel = (sel / 3) * 3 + (sel % 3 + 2) % 3;
+            if (e & UI_RIGHT) sel = (sel / 3) * 3 + (sel % 3 + 1) % 3;
+            if (e & (UI_UP | UI_DOWN)) sel = (sel + 3) % N_OPT;
+        } else {
+            if (e & UI_UP)   sel = (sel + N_OPT - 1) % N_OPT;
+            if (e & UI_DOWN) sel = (sel + 1) % N_OPT;
+        }
         if (e & UI_CANCEL) break;
-        if (sel == 5 && (e & (UI_OK | UI_START | UI_LEFT | UI_RIGHT))) { g_showfps = !g_showfps; opts_save(); }   /* FPS: se prende y apaga en esta misma fila */
-        else if (e & (UI_OK | UI_START)) {
+        if (e & (UI_OK | UI_START)) {
             if (sel == 0) { ui_opt_screen(); ui_prime(); g_stage = "opciones"; }
             else if (sel == 1) { ui_opt_pads(); ui_prime(); g_stage = "opciones"; }
             else if (sel == 2) { ui_opt_sound(); ui_prime(); g_stage = "opciones"; }
             else if (sel == 3) { ui_opt_netinfo(); ui_prime(); g_stage = "opciones"; }
             else if (sel == 4) { ui_opt_image(); ui_prime(); g_stage = "opciones"; }
-            else break;
+            else { g_showfps = !g_showfps; opts_save(); }
         }
         if (hr_usable()) {
             static const HHint hh[2] = { { "X", "ENTRAR", HC_BX }, { "O", "VOLVER", HC_BO } };
-            char fps[40], val[24];
-            const char *rows[7];
-            for (i = 0; i < 7; i++) rows[i] = items[i];
-            snprintf(fps, sizeof fps, "FPS EN PANTALLA: %s", g_showfps ? "SÍ" : "NO");
-            rows[5] = fps;
-            hr_head("OPCIONES  ·  se guardan solas");
-            hr_panel(70, 210, 900, 650);
-            hr_rows(96, 232, 778, rows, 7, sel, 0, 58);
-            hr_panel(940, 210, 1210, 430);
-            hr_text(962, 250, "Ahora", FS_M, HC_YEL, 2);
-            hr_text(962, 290, "Pantalla:", FS_S, HC_DIM, 2);
-            hr_text(962, 324, screen_names[g_screen], hr_tw(screen_names[g_screen], FS_M) > 236 ? FS_S : FS_M, HC_WHITE, 2);
-            hr_text(962, 368, "Volumen:", FS_S, HC_DIM, 2);
-            snprintf(val, sizeof val, "%d %%", g_volume);
-            hr_text(962, 402, val, FS_M, HC_WHITE, 2);
+            hr_head("Opciones  ·  se guardan solas");
+            for (i = 0; i < N_OPT; i++) {
+                int x0 = 70 + (i % 3) * 390, y0 = 220 + (i / 3) * 205;
+                sm_draw_tile(x0, y0, x0 + 360, y0 + 178, i == sel, 0, ic[i], lab[i], i == 5 ? (g_showfps ? "SÍ" : "NO") : sub[i], 0);
+            }
             hr_hints(hh, 2);
             present();
 #ifdef NESNET_HOST
@@ -11884,7 +11936,7 @@ static void ui_options(void)
         for (i = 0; i < N_OPT; i++) {
             char line[48];
             if (i == 5) snprintf(line, sizeof line, "%s FPS EN PANTALLA: %s", i == sel ? ">" : " ", g_showfps ? "SI" : "NO");
-            else snprintf(line, sizeof line, "%s %s", i == sel ? ">" : " ", items[i]);
+            else snprintf(line, sizeof line, "%s %s", i == sel ? ">" : " ", lab[i]);
             ui_center(66 + i * 18, line, 1, i == sel ? 0xFFFFFFFF : 0xFF8080A0);
         }
         ui_center(200, "ARRIBA/ABAJO + X", 1, 0xFF8080A0);
@@ -12810,141 +12862,104 @@ int main(int argc, char **argv)
         printf("sticktest bad=%u (centro 128, zona muerta 78..178)\n", bad);
         return bad != 0;
     } else if (!strcmp(mode, "maptest")) {
-        /* v1.8.2: pruebas del mapeo de botones, el turbo y el guardado de opciones (funciones puras) */
-        unsigned bad = 0, n = 0, btns, d, p, i, f;
+        /* v1.9.10: pruebas del mapeo de botones de los 4 mandos (sin turbo) y del guardado de opciones (funciones puras) */
+        unsigned bad = 0, n = 0, btns, d, p, i, a;
         const uint16_t dirbits[4] = { NB_UP, NB_DOWN, NB_LEFT, NB_RIGHT };
-        /* 1) con el mapeo por defecto el resultado es IDENTICO a la formula de la v1.8.1 (todas las combinaciones de botones y direcciones) */
+        /* 1) con el mapeo por defecto el resultado es IDENTICO a la formula de antes (O=A, X=B, CUADRADO=Y, TRIANGULO=X, L1=L, R1=R,
+         *    R2=R2, L2=L2 solo mandos 2 a 4, SELECT, START), con todas las combinaciones de botones y direcciones, en los 4 mandos */
         opts_defaults();
-        for (p = 0; p < 2; p++)
+        for (p = 0; p < 4; p++)
             for (btns = 0; btns < (1u << PB_COUNT); btns++)
                 for (d = 0; d < 16; d++) {
                     uint16_t dirs = 0, ref = 0;
                     for (i = 0; i < 4; i++) if (d & (1u << i)) dirs |= dirbits[i];
-                    if (btns & PB_BIT(PB_CIRCLE)) ref |= NB_A;
-                    if (btns & PB_BIT(PB_CROSS))  ref |= NB_B;
-                    if (btns & PB_BIT(PB_SELECT)) ref |= NB_SEL;
-                    if (btns & PB_BIT(PB_START))  ref |= NB_START;
+                    if (btns & PB_BIT(PB_CIRCLE))   ref |= NB_A;
+                    if (btns & PB_BIT(PB_CROSS))    ref |= NB_B;
+                    if (btns & PB_BIT(PB_SELECT))   ref |= NB_SEL;
+                    if (btns & PB_BIT(PB_START))    ref |= NB_START;
+                    if (btns & PB_BIT(PB_SQUARE))   ref |= NB_Y;
+                    if (btns & PB_BIT(PB_TRIANGLE)) ref |= NB_X;
+                    if (btns & PB_BIT(PB_L1))       ref |= NB_L;
+                    if (btns & PB_BIT(PB_R1))       ref |= NB_R;
+                    if (btns & PB_BIT(PB_R2))       ref |= NB_R2;
+                    if (p > 0 && (btns & PB_BIT(PB_L2))) ref |= NB_L2;
                     ref |= dirs;
                     if ((ref & NB_UP) && (ref & NB_DOWN))    ref &= (uint16_t)~NB_DOWN;
                     if ((ref & NB_LEFT) && (ref & NB_RIGHT)) ref &= (uint16_t)~NB_RIGHT;
                     n++;
                     if (map_nes_bits((int)p, btns, dirs) != ref) bad++;
                 }
-        printf("maptest defecto==v1.8.1: %u combinaciones, bad=%u\n", n, bad);
-        /* 2) turbo: apretado 2 cuadros, suelto 2, empezando apretado; soltar reinicia; cada mando y cada turbo es independiente */
+        printf("maptest defecto=formula anterior: %u combinaciones, bad=%u\n", n, bad);
+        /* 2) cambiar botones: salta los usados, solo 7 y 8 quedan sin asignar, R3 y L2 del mando 1 reservados, mandos 1 a 4 independientes */
         {
-            unsigned tb = 0;
+            unsigned rb = 0;
             opts_defaults();
-            g_map[0][MA_TA] = PB_SQUARE; g_map[0][MA_TB] = PB_TRIANGLE;
-            for (f = 0; f < 16; f++) {
-                uint16_t a = map_nes_bits(0, PB_BIT(PB_SQUARE), 0);
-                int want = ((f >> 1) & 1) == 0;
-                if (((a & NB_A) != 0) != want || (a & NB_B)) tb++;
+            map_cycle(0, MA_B1, +1);                                          /* O -> siguiente libre: CUADRADO esta usado (3), sigue TRIANGULO (4)... todos usados hasta L3 */
+            if (g_map[0][MA_B1] != PB_L3) rb++;
+            map_cycle(0, MA_B1, -1);                                          /* y hacia atras vuelve a O */
+            if (g_map[0][MA_B1] != PB_CIRCLE) rb++;
+            map_assign(0, MA_B7, PB_NONE);
+            if (g_map[0][MA_B7] != PB_NONE) rb++;
+            map_cycle(0, MA_B7, +1);                                          /* sin asignar -> X(usado) ... L2 (reservado) -> R2 (queda libre al soltar el 7) */
+            if (g_map[0][MA_B7] != PB_R2) rb++;
+            map_cycle(0, MA_B7, -1);
+            if (g_map[0][MA_B7] != PB_NONE) rb++;                             /* hacia atras vuelve a "sin asignar" (valido en el 7) */
+            for (p = 0; p < 4; p++) {
+                int k, saw_r3 = 0, saw_l2 = 0;
+                for (k = 0; k < 60; k++) { map_cycle((int)p, MA_B8, +1); if (g_map[p][MA_B8] == PB_R3) saw_r3 = 1; if (g_map[p][MA_B8] == PB_L2) saw_l2 = 1; }
+                if (p == 0 && (saw_r3 || saw_l2)) rb++;                       /* mando 1: R3 y L2 prohibidos */
+                if (p > 0 && !saw_r3) rb++;                                   /* mandos 2 a 4: R3 si se puede */
             }
-            (void)map_nes_bits(0, 0, 0);                                      /* soltar */
-            for (f = 0; f < 6; f++) {                                         /* turbo B: tambien empieza apretado */
-                uint16_t a = map_nes_bits(0, PB_BIT(PB_TRIANGLE), 0);
-                int want = ((f >> 1) & 1) == 0;
-                if (((a & NB_B) != 0) != want || (a & NB_A)) tb++;
-            }
-            (void)map_nes_bits(0, 0, 0);
-            if (!(map_nes_bits(0, PB_BIT(PB_SQUARE), 0) & NB_A)) tb++;        /* primer cuadro tras apretar = apretado */
-            (void)map_nes_bits(0, PB_BIT(PB_SQUARE), 0);
-            if (map_nes_bits(0, PB_BIT(PB_SQUARE), 0) & NB_A) tb++;           /* tercer cuadro = suelto */
-            for (f = 0; f < 8; f++) {                                         /* el mando 2 no tiene turbo asignado: nunca dispara */
-                if (map_nes_bits(1, PB_BIT(PB_SQUARE) | PB_BIT(PB_TRIANGLE), 0) & (NB_A | NB_B)) tb++;
-            }
-            (void)map_nes_bits(0, 0, 0);
-            for (f = 0; f < 8; f++) {                                         /* con A normal apretada, el turbo no la suelta */
-                if (!(map_nes_bits(0, PB_BIT(PB_CIRCLE) | PB_BIT(PB_SQUARE), 0) & NB_A)) tb++;
-            }
-            printf("maptest turbo: bad=%u\n", tb);
-            bad += tb;
-        }
-        /* 3) reglas de asignacion */
-        {
-            unsigned rb = 0, seen[PB_COUNT + 1], k;
             opts_defaults();
-            map_cycle(0, MA_A, +1);                                           /* A: O -> CUADRADO (libre) */
-            if (g_map[0][MA_A] != PB_SQUARE) rb++;
-            opts_defaults();
-            map_cycle(0, MA_A, -1);                                           /* A hacia atras: salta X (B), "sin asignar" (no vale), SELECT y START (usados) -> L3 (R3 esta reservado) */
-            if (g_map[0][MA_A] != PB_L3 || g_map[0][MA_B] != PB_CROSS) rb++;
-            opts_defaults();
-            map_cycle(0, MA_TA, +1);                                          /* turbo A: sin asignar -> salta X y O (usados) -> CUADRADO */
-            if (g_map[0][MA_TA] != PB_SQUARE) rb++;
-            map_cycle(0, MA_TA, -1);                                          /* y hacia atras vuelve a sin asignar */
-            if (g_map[0][MA_TA] != PB_NONE) rb++;
-            map_assign(0, MA_TA, PB_NONE); map_assign(0, MA_TB, PB_NONE);     /* quitar un turbo ya quitado no toca nada mas */
-            if (g_map[0][MA_TA] != PB_NONE || g_map[0][MA_TB] != PB_NONE || g_map[0][MA_A] != PB_CIRCLE) rb++;
-            /* R3: el mando 1 nunca puede tenerlo; el mando 2 si. Se recorre todo el ciclo de un turbo */
-            for (p = 0; p < 2; p++) {
-                opts_defaults();
-                memset(seen, 0, sizeof seen);
-                for (k = 0; k < 40; k++) { map_cycle((int)p, MA_TA, +1); seen[g_map[p][MA_TA] + 1]++; }
-                if (p == 0 && (seen[PB_R3 + 1] != 0 || seen[PB_L2 + 1] != 0)) rb++;   /* v1.9.6: R3 y L2 reservados en el mando 1 */
-                if (p == 1 && (seen[PB_R3 + 1] == 0 || seen[PB_L2 + 1] == 0)) rb++;
-                if (seen[0] == 0) rb++;                                       /* "sin asignar" tambien se alcanza */
-                if (seen[PB_CROSS + 1] != 0 || seen[PB_CIRCLE + 1] != 0 || seen[PB_START + 1] != 0 || seen[PB_SELECT + 1] != 0) rb++;   /* nunca pisa botones usados */
-            }
-            /* mapeos guardados: validacion */
-            {
-                int ok[MA_COUNT]  = { PB_CIRCLE, PB_CROSS, PB_SELECT, PB_START, PB_NONE, PB_NONE };
-                int dup[MA_COUNT] = { PB_CIRCLE, PB_CIRCLE, PB_SELECT, PB_START, PB_NONE, PB_NONE };
-                int non[MA_COUNT] = { PB_NONE, PB_CROSS, PB_SELECT, PB_START, PB_NONE, PB_NONE };
-                int r2[MA_COUNT]  = { PB_R3, PB_CROSS, PB_SELECT, PB_START, PB_NONE, PB_NONE };
-                int big[MA_COUNT] = { PB_CIRCLE, PB_CROSS, PB_SELECT, PB_START, 99, PB_NONE };
-                if (!map_valid(ok, 0) || !map_valid(ok, 1)) rb++;
-                if (map_valid(dup, 0) || map_valid(non, 0) || map_valid(r2, 0) || map_valid(big, 1)) rb++;
-                if (!map_valid(r2, 1)) rb++;                                  /* R3 vale en el mando 2 */
-                {   /* v1.9.6: L2 reservado en el mando 1 (captura), libre en el mando 2 */
-                    int l2m[MA_COUNT] = { PB_L2, PB_CROSS, PB_SELECT, PB_START, PB_NONE, PB_NONE };
-                    if (map_valid(l2m, 0) || !map_valid(l2m, 1)) rb++;
-                }
-            }
-            printf("maptest reglas: bad=%u\n", rb);
+            map_cycle(0, MA_COIN, +1);                                        /* moneda nunca queda sin asignar */
+            for (a = 0; a < 60; a++) { map_cycle(0, MA_COIN, +1); if (g_map[0][MA_COIN] == PB_NONE) rb++; }
+            map_cycle(2, MA_B1, +1);
+            if (g_map[0][MA_B1] != PB_CIRCLE || g_map[1][MA_B1] != PB_CIRCLE || g_map[3][MA_B1] != PB_CIRCLE) rb++;   /* un mando no toca a los otros */
+            map_defaults(2);
+            if (g_map[2][MA_B1] != PB_CIRCLE || g_map[2][MA_B8] != PB_L2) rb++;
+            printf("maptest cambios: bad=%u\n", rb);
             bad += rb;
         }
-        /* 4) fuzz: 300000 cambios al azar; el mapeo siempre queda valido (botones normales siempre con boton, sin repetidos, sin R2 en el mando 1) */
+        /* 3) validez de un mapeo leido de archivo */
         {
-            unsigned fb = 0;
-            srand(12345);
-            opts_defaults();
-            for (f = 0; f < 300000; f++) {
-                int pp = rand() & 1, act = rand() % MA_COUNT, dd = (rand() & 1) ? 1 : -1;
-                if ((rand() % 50) == 0) map_defaults(pp);
-                else if ((rand() % 7) == 0) { int b = (rand() % (PB_COUNT + 1)) - 1; if (map_allowed(pp, act, b)) map_assign(pp, act, b); }
-                else map_cycle(pp, act, dd);
-                if (!map_valid(g_map[0], 0) || !map_valid(g_map[1], 1)) fb++;
-            }
-            printf("maptest fuzz: bad=%u\n", fb);
-            bad += fb;
+            unsigned vb = 0;
+            int ok[MA_COUNT]  = { PB_CIRCLE, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, PB_NONE, PB_SELECT, PB_START };
+            int dup[MA_COUNT] = { PB_CIRCLE, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, PB_NONE, PB_SELECT, PB_START };
+            int non[MA_COUNT] = { PB_NONE, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, PB_NONE, PB_SELECT, PB_START };
+            int r3[MA_COUNT]  = { PB_R3, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, PB_NONE, PB_SELECT, PB_START };
+            int big[MA_COUNT] = { PB_CIRCLE, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, 99, PB_SELECT, PB_START };
+            if (!map_valid(ok, 0) || !map_valid(ok, 3)) vb++;
+            if (map_valid(dup, 0) || map_valid(non, 1) || map_valid(r3, 0) || map_valid(big, 2)) vb++;
+            if (!map_valid(r3, 1)) vb++;                                      /* R3 en el mando 2 si vale */
+            { int l2m[MA_COUNT] = { PB_L2, PB_CROSS, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_R2, PB_NONE, PB_SELECT, PB_START }; if (map_valid(l2m, 0) || !map_valid(l2m, 1)) vb++; }
+            printf("maptest validez: bad=%u\n", vb);
+            bad += vb;
         }
-        /* 5) guardar y cargar */
+        /* 4) guardar y leer opciones.txt (4 mandos), y archivo estropeado / archivo viejo de 6 valores */
         {
             unsigned sb = 0;
-            char path[300], dir[] = "/tmp/nesnet_maptest";
+            char path[300], dir[] = "/tmp/arcade_maptest";
             FILE *fp;
-            int save_map[2][MA_COUNT], save_screen;
+            int save_map[NPADS][MA_COUNT], save_screen;
             mkdir(dir, 0755);
             snprintf(g_dir, sizeof g_dir, "%s", dir);
             g_log = NULL;
             opts_defaults();
-            g_map[0][MA_A] = PB_SQUARE; g_map[0][MA_TA] = PB_L1; g_map[1][MA_TB] = PB_R2; g_screen = 2;
+            g_map[0][MA_B1] = PB_SQUARE; g_map[0][MA_B3] = PB_CIRCLE; g_map[3][MA_B8] = PB_R3; g_map[2][MA_B7] = PB_NONE; g_screen = 2;
             opts_save();
             memcpy(save_map, g_map, sizeof save_map); save_screen = g_screen;
             opts_defaults();
             opts_load();
             if (memcmp(save_map, g_map, sizeof save_map) || g_screen != save_screen) sb++;
-            /* archivo estropeado: lineas basura, mapeo invalido del mando 1, pantalla fuera de rango: valen los defectos / lo valido */
             snprintf(path, sizeof path, "%s/opciones.txt", dir);
             fp = fopen(path, "w");
-            fprintf(fp, "basura\nscreen=9\npad1=3,3,3,3,3,3\npad2=1,0,11,10,-1,2\nxx=1\n");
+            fprintf(fp, "basura\nscreen=9\npad1=1,0,11,10,-1,2\nmando1=3,3,3,3,3,3,3,3,3,3\nmando2=1,0,2,3,4,5,-1,-1,11,10\nmando4=1,0,2,3,4,5,6,7,11,10\nxx=1\n");
             fclose(fp);
             opts_load();
             if (g_screen != 0) sb++;                                          /* 9 no vale: queda la de por defecto */
-            if (g_map[0][MA_A] != PB_CIRCLE || g_map[0][MA_B] != PB_CROSS || g_map[0][MA_TA] != PB_NONE) sb++;   /* mando 1: invalido -> defecto */
-            if (g_map[1][MA_TB] != PB_SQUARE || g_map[1][MA_SEL] != PB_SELECT || g_map[1][MA_TA] != PB_NONE) sb++;   /* mando 2: valido, se respeta */
+            if (g_map[0][MA_B1] != PB_CIRCLE || g_map[0][MA_B2] != PB_CROSS) sb++;           /* mando 1: invalido (y el formato viejo) -> defecto */
+            if (g_map[1][MA_B1] != PB_CIRCLE || g_map[1][MA_B2] != PB_CROSS || g_map[1][MA_B7] != PB_NONE || g_map[1][MA_B8] != PB_NONE) sb++;   /* mando 2: valido, se respeta */
+            if (g_map[3][MA_B7] != PB_L2 || g_map[3][MA_B8] != PB_R2) sb++;                   /* mando 4: L2 y R2 como botones 7 y 8 (valido fuera del mando 1) */
             printf("maptest guardado: bad=%u\n", sb);
             bad += sb;
         }
