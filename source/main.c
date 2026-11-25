@@ -8455,7 +8455,7 @@ static int ui_rom_select(int pick_only)
                 hr_textc(975, 602, line, FS_S, HC_DIM);
                 hr_hints(hh1, 3);
             }
-            }
+            } else g_hr_on = 1;                   /* sin cambios: se vuelve a copiar el cuadro ya dibujado */
             present();
 #ifdef NESNET_HOST
             sleep_ms(16);
@@ -9016,7 +9016,7 @@ static int ui_menu(void)
                     hr_textc(975, 604, "Elige uno en ELEGIR JUEGO", FS_S, HC_DIM);
                 }
                 hr_hints(hh, 2);
-            }
+            } else g_hr_on = 1;                   /* sin cambios: se vuelve a copiar el cuadro ya dibujado (cada buffer de pantalla lo necesita) */
             present();
 #ifdef NESNET_HOST
             sleep_ms(16);
