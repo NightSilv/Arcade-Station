@@ -7479,32 +7479,80 @@ out:
 /* ------------------------------------------------------------------ */
 static void code_pretty(const char *code, char *out);
 /* v1.9.7: pantalla de "sala creada" (codigo, estado del puerto, esperando al amigo) */
+static void hr_dot(int cx, int cy, int r, uint32_t col, int a);
+
+/* v1.9.10: pastilla neon con texto (estado de la sala, etc.) centrada en cx, cy */
+static void hr_chip(int cx, int cy, const char *text, uint32_t col)
+{
+    int w = hr_tw(text, FS_S) + 52;
+    hr_nrect(cx - w / 2, cy - 21, cx + w / 2, cy + 21, 14, 3, col, 200);
+    hr_textc(cx, cy + 8, text, FS_S, HC_WHITE);
+}
+
+/* v1.9.10: los 10 digitos de un codigo de sala en cuadros neon (grupos 3-3-4). pos >= 0 marca un digito (rosa, con flechas arriba y abajo). */
+static void hr_digit_boxes(const char *digs, int pos, int y0)
+{
+    enum { BW = 76, BH = 100, GAP = 8, GRP = 28 };
+    int tot = 10 * BW + 9 * GAP + 2 * GRP, x = (HR_W - tot) / 2, k, i;
+    for (k = 0; k < 10; k++) {
+        int xx = x + k * (BW + GAP) + (k >= 3 ? GRP : 0) + (k >= 6 ? GRP : 0), on = (k == pos);
+        char c1[2];
+        c1[0] = digs[k]; c1[1] = 0;
+        hr_nrect(xx, y0, xx + BW, y0 + BH, 14, on ? 5 : 3, on ? HC_RED : HC_GRID, 215);
+        hr_textc(xx + BW / 2, y0 + 78, c1, FS_X, on ? HC_RED : HC_GRID);
+        if (on) {
+            int cx = xx + BW / 2;
+            for (i = 0; i < 10; i++) {             /* flecha arriba y flecha abajo (triangulos rellenos) */
+                hr_rect(cx - i * 3 / 2, y0 - 12 - i, cx + i * 3 / 2 + 1, y0 - 11 - i, HC_RED, 256);
+                hr_rect(cx - i * 3 / 2, y0 + BH + 12 + i, cx + i * 3 / 2 + 1, y0 + BH + 13 + i, HC_RED, 256);
+            }
+        }
+    }
+}
+
 static void hr_room_screen(const char *sub, const char *code, const char *l2, const char *l3, uint32_t col3)
 {
     static const HHint hh[1] = { { "O", "CANCELAR", HC_BO } };
-    char pc[24];
-    int dots = (int)((now_ms() / 400) % 3), k;
-    code_pretty(code, pc);
-    hr_head(sub);
-    hr_panel(230, 200, 1050, 600);
-    hr_text(270, 252, "TU CÓDIGO DE SALA", FS_M, HC_DIM, 2);
-    hr_text(270, 350, pc, FS_X, HC_YEL, 4);
-    hr_text(270, 410, "Dáselo a tu amigo", FS_L, HC_WHITE, 2);
-    hr_text(270, 452, l3, FS_M, hr_col(col3), 2);
-    hr_text(270, 486, l2, FS_S, HC_DIM, 2);
-    hr_text(270, 552, "Esperando al amigo...", FS_L, HC_WHITE, 2);
-    for (k = 0; k < 3; k++) hr_rect(760 + k * 34, 534, 782 + k * 34, 556, k == dots ? HC_RED : 0xFF5A283Cu, 256);
+    char dg[16], mode[24];
+    int dots = (int)((now_ms() / 400) % 3), k, i, w1, w2;
+    for (i = 0, k = 0; code[i] && k < 10; i++) if (code[i] >= '0' && code[i] <= '9') dg[k++] = code[i];
+    while (k < 10) dg[k++] = '-';
+    dg[10] = 0;
+    if (!strncmp(sub, "SALA DE 4", 9)) snprintf(mode, sizeof mode, "MODO: %s", g_mode4 == 0 ? "2 VS 2" : g_mode4 == 1 ? "2 VS 1" : "1 VS 2");
+    else snprintf(mode, sizeof mode, "MODO: 1 VS 1");
+    hr_head("Crear sala");
+    hr_textc(640, 238, "TU CÓDIGO DE SALA", FS_M, HC_WHITE);
+    hr_digit_boxes(dg, -1, 256);
+    hr_textc(640, 398, "Dáselo a tu amigo", FS_M, HC_DIM);
+    w1 = hr_tw(mode, FS_S) + 52; w2 = hr_tw(l2, FS_S) + 52;
+    hr_chip(640 - (w1 + w2 + 30) / 2 + w1 / 2, 452, mode, HC_RED);
+    hr_chip(640 + (w1 + w2 + 30) / 2 - w2 / 2, 452, l2, HC_GRID);
+    hr_chip(640, 504, l3, hr_col(col3));
+    hr_nrect(340, 548, 940, 622, 16, 3, HC_GRID, 205);
+    hr_textc(600, 596, "Esperando al amigo", FS_L, HC_WHITE);
+    for (k = 0; k < 3; k++) hr_rect(800 + k * 26, 582, 814 + k * 26, 596, k == dots ? HC_RED : 0xFF5A283Cu, 256);
     hr_hints(hh, 1);
 }
 
-static void ui_show(const char *l1, const char *l2, const char *l3)
+/* v1.9.10: pantalla de estado: cuadro neon con un circulo de puntos girando (spin = 0: sin circulo, para avisos y errores) */
+static void ui_show_x(const char *l1, const char *l2, const char *l3, int spin)
 {
+    static const int cxs[12] = { 100, 87, 50, 0, -50, -87, -100, -87, -50, 0, 50, 87 };
+    static const int sys[12] = { 0, 50, 87, 100, 87, 50, 0, -50, -87, -100, -87, -50 };
     if (hr_usable()) {
+        int head = (int)((now_ms() / 80) % 12), i, y1 = spin ? 392 : 360;
         hr_head(NULL);
-        hr_panel(230, 250, 1050, 480);
-        if (l1) hr_textc(640, 340, l1, FS_L, HC_WHITE);
-        if (l2) hr_textc(640, 396, l2, FS_M, HC_DIM);
-        if (l3) hr_textc(640, 438, l3, FS_M, HC_DIM);
+        hr_nrect(300, 240, 980, 500, 16, 4, HC_GRID, 215);
+        if (spin) {
+            for (i = 0; i < 12; i++) {
+                int age = ((head - i) % 12 + 12) % 12, r = 9 - age * 7 / 11, a = 256 - age * 18;
+                hr_dot(640 + cxs[i] * 32 / 100, 306 + sys[i] * 32 / 100, r + 3, HC_RED, a / 4);
+                hr_dot(640 + cxs[i] * 32 / 100, 306 + sys[i] * 32 / 100, r, HC_RED, a);
+            }
+        }
+        if (l1) hr_textc(640, y1, l1, FS_H, HC_WHITE);
+        if (l2) hr_textc(640, y1 + 48, l2, FS_M, HC_DIM);
+        if (l3) hr_textc(640, y1 + 88, l3, FS_S, HC_DIM);
         present();
         return;
     }
@@ -7516,13 +7564,15 @@ static void ui_show(const char *l1, const char *l2, const char *l3)
     present();
 }
 
+static void ui_show(const char *l1, const char *l2, const char *l3) { ui_show_x(l1, l2, l3, 1); }
+
 static void ui_message(const char *l1, const char *l2, int frames)
 {
     int i;
     for (i = 0; i < frames && g_running; i++) {
         uint16_t e;
         pump();
-        ui_show(l1, l2, NULL);
+        ui_show_x(l1, l2, NULL, 0);
         e = ui_edges();
         if (i > 60 && (e & (UI_OK | UI_CANCEL | UI_START))) break;   /* ~1 s minimo en pantalla */
 #ifdef NESNET_HOST
@@ -12218,22 +12268,18 @@ static int ui_enter_code(char *out)
             return 1;
         }
         if (hr_usable()) {
-            static const HHint hh[2] = { { "START", "CONECTAR", HC_BX }, { "O", "CANCELAR", HC_BO } };
-            int adv = hr_tw("0", FS_X), tot = 10 * adv + 2 * 36, x0 = (HR_W - tot) / 2, k;
-            hr_head("UNIRSE A UNA SALA");
-            hr_panel(230, 200, 1050, 600);
-            hr_text(270, 252, "ESCRIBE EL CÓDIGO DEL HOST", FS_M, HC_DIM, 2);
-            for (k = 0; k < 10; k++) {
-                char c1[2] = { (char)('0' + d[k]), 0 };
-                int x = x0 + k * adv + (k >= 3 ? 36 : 0) + (k >= 6 ? 36 : 0);
-                hr_text(x, 372, c1, FS_X, k == pos ? HC_YEL : HC_WHITE, 4);
-                if (k == pos) hr_rect(x + 4, 392, x + adv - 8, 402, HC_YEL, 256);
-            }
+            static const HHint hh[4] = { { "< >", "MOVER", HC_BG }, { "^ v", "CAMBIAR", HC_BG }, { "START", "CONECTAR", HC_BX }, { "O", "CANCELAR", HC_BO } };
+            char dg[12];
+            int k;
+            for (k = 0; k < 10; k++) dg[k] = (char)('0' + d[k]);
+            dg[10] = 0;
+            hr_head("Unirse a una sala");
+            hr_textc(640, 240, "ESCRIBE EL CÓDIGO DEL HOST", FS_M, HC_WHITE);
+            hr_digit_boxes(dg, pos, 292);
             snprintf(line, sizeof line, "Dígito %d de 10", pos + 1);
-            hr_text(270, 460, line, FS_S, HC_DIM, 2);
-            if (saved) hr_text(270, 500, "Último código usado: START para conectar", FS_S, HC_GREEN, 2);
-            hr_text(270, 548, "ARRIBA/ABAJO cambia el dígito  ·  IZQ/DER mueve", FS_S, HC_DIM, 2);
-            hr_hints(hh, 2);
+            hr_textc(640, 490, line, FS_S, HC_DIM);
+            if (saved) hr_chip(640, 548, "ÚLTIMO CÓDIGO USADO  ·  START PARA CONECTAR", HC_GREEN);
+            hr_hints(hh, 4);
             present();
 #ifdef NESNET_HOST
             sleep_ms(16);
